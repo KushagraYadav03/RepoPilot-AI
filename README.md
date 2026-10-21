@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # RepoPilot AI
 
 An AI-powered software engineering assistant for GitHub repositories.
@@ -20,3 +21,6 @@ An AI-powered software engineering assistant for GitHub repositories.
 - Qdrant
 - Docker
 -
+=======
+# RepoPilot-AI
+>>>>>>> 5c00dd1b4108ebf82924b204a9a4645f42aec6a2
