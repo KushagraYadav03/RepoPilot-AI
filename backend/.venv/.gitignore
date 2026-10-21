@@ -1,15 +1,14 @@
 
-# Created by venv; see https://docs.python.org/3/library/venv.html
-
 # Python virtual environment
-ye-backend/.venv/
+backend/.venv/
+.venv/
 
 # Python cache
 __pycache__/
 *.pyc
 
 # Environment variables
-.envz
+.env
 .env.*
 !.env.example
 
