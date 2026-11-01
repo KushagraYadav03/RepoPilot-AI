@@ -1,5 +1,6 @@
-from sqlalchemy import String, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column
+
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 
@@ -7,12 +8,17 @@ from app.db.base import Base
 class Repository(Base):
     __tablename__ = "repositories"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id = Column(Integer, primary_key=True, index=True)
 
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id")
+    name = Column(String, nullable=False)
+
+    github_url = Column(String, nullable=False)
+
+    owner_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True
     )
 
-    name: Mapped[str] = mapped_column(String(200))
-
-    url: Mapped[str] = mapped_column(String(500))
+    owner = relationship("User")

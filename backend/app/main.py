@@ -1,4 +1,3 @@
-
 import logging
 
 from fastapi import FastAPI, Depends
@@ -12,6 +11,10 @@ from app.core.exceptions import (
     register_exception_handlers,
 )
 from app.core.dependencies import get_db
+from app.api.routes.protected import router as protected_router
+from app.api.routes.auth import router as auth_router
+
+from app.api.routes.repositories import router as repositories_router
 
 settings = get_settings()
 
@@ -19,11 +22,18 @@ setup_logging(settings.log_level)
 
 logger = logging.getLogger(__name__)
 
+
 app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
 )
+from app.api.routes.github import router as github_router
 
+app.include_router (github_router)
+app.include_router(repositories_router)
+
+app.include_router(protected_router)
+app.include_router(auth_router)
 register_exception_handlers(app)
 
 
