@@ -1,8 +1,41 @@
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.repository import Repository
+
+
+def sanitize_repository_name(name: str) -> str:
+    cleaned_name = str(name).strip()
+
+    if not cleaned_name:
+        raise ValueError("Repository name is required")
+
+    return cleaned_name
+
+
+def normalize_github_url(github_url: str) -> str:
+    parsed_url = urlparse(str(github_url).strip())
+    hostname = (parsed_url.hostname or "").lower()
+
+    if parsed_url.scheme not in {"http", "https"}:
+        raise ValueError("GitHub URL must use http or https")
+
+    if hostname not in {"github.com", "www.github.com"}:
+        raise ValueError("GitHub URL must point to github.com")
+
+    path_parts = [part for part in parsed_url.path.split("/") if part]
+
+    if len(path_parts) != 2:
+        raise ValueError("GitHub URL must be in the format https://github.com/owner/repo")
+
+    owner, repo = path_parts[0], path_parts[1].removesuffix(".git")
+
+    if not owner or not repo:
+        raise ValueError("GitHub URL must include both owner and repository name")
+
+    return f"https://github.com/{owner}/{repo}"
 
 
 def create_repository(
@@ -11,10 +44,23 @@ def create_repository(
     github_url: str,
     owner_id: int
 ):
+    sanitized_name = sanitize_repository_name(name)
+    normalized_url = normalize_github_url(github_url)
+
+    existing_repository = db.scalar(
+        select(Repository).where(
+            Repository.owner_id == owner_id,
+            Repository.github_url == normalized_url,
+        )
+    )
+
+    if existing_repository is not None:
+        raise ValueError("Repository already exists for this user")
+
     repository = Repository(
-        name=name,
-        github_url=github_url,
-        owner_id=owner_id
+        name=sanitized_name,
+        github_url=normalized_url,
+        owner_id=owner_id,
     )
 
     db.add(repository)

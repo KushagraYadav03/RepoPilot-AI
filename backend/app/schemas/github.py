@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel
 
 
@@ -37,6 +36,8 @@ class GitHubTreeResponse(BaseModel):
     repository: str
 
     default_branch: str
+
+    tree_sha: str | None = None
 
     truncated: bool
 

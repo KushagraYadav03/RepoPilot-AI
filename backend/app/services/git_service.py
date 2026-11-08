@@ -6,198 +6,256 @@ from urllib.parse import quote
 
 from fastapi import HTTPException
 
+from app.core.config import settings
+from app.utils.file_filters import (
+    ALLOWED_EXTENSIONS,
+    MAX_FILE_SIZE,
+    MAX_TOTAL_SIZE,
+    MAX_FILES,
+    should_exclude_file,
+)
 
-# File ingestion limits
 
-MAX_FILE_SIZE = 1 * 1024 * 1024
+GITHUB_API_BASE_URL = "https://api.github.com"
 
-MAX_TOTAL_SIZE = 10 * 1024 * 1024
-
-MAX_FILES = 200
-
-
-# Allowed file extensions
-
-ALLOWED_EXTENSIONS = {
-    ".py",
-    ".java",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".html",
-    ".css",
-    ".json",
-    ".md",
-    ".txt",
-    ".yml",
-    ".yaml",
-    ".toml",
-    ".sql",
-    ".sh",
-    ".xml",
-    ".properties",
-    ".go",
-    ".rs",
-    ".c",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".cs",
-    ".php",
-    ".rb",
-    ".kt"
+GITHUB_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "RepoPilot-AI",
+    "X-GitHub-Api-Version": "2022-11-28",
 }
 
 
-# Sensitive and unnecessary files to exclude
+def get_github_headers() -> dict:
+    """
+    Return GitHub API headers.
 
-IGNORED_FILES = {
-    ".env",
-    ".env.local",
-    ".env.production",
-    "id_rsa",
-    "id_ed25519",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "poetry.lock",
-    "uv.lock",
-    "Cargo.lock",
-    "Gemfile.lock",
-    "composer.lock"
-}
+    Uses authenticated requests when GITHUB_TOKEN is configured.
+    Never logs or exposes the token.
+    """
+
+    headers = GITHUB_HEADERS.copy()
+
+    token = (settings.github_token or "").strip()
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    return headers
 
 
-# Folders to exclude
+def _raise_github_error(
+    response: httpx.Response,
+    operation: str,
+):
+    """Raise a useful error containing GitHub's actual response."""
 
-IGNORED_DIRECTORIES = {
-    ".git",
-    "node_modules",
-    "venv",
-    ".venv",
-    "__pycache__",
-    "dist",
-    "build",
-    ".idea",
-    ".vscode",
-    "coverage"
-}
+    status_code = response.status_code
+    response_text = response.text[:500]
+
+    if status_code == 404:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"GitHub {operation}: "
+                "repository or resource not found."
+            ),
+        )
+
+    if status_code == 401:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"GitHub {operation} returned 401. "
+                "The configured GitHub token is invalid or expired."
+            ),
+        )
+
+    if status_code == 403:
+        remaining = response.headers.get(
+            "X-RateLimit-Remaining",
+            "unknown",
+        )
+
+        reset = response.headers.get(
+            "X-RateLimit-Reset",
+            "unknown",
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"GitHub {operation} returned 403. "
+                f"Rate limit remaining: {remaining}. "
+                f"Rate limit reset: {reset}. "
+                f"Response: {response_text}"
+            ),
+        )
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            f"GitHub {operation} failed. "
+            f"HTTP status: {status_code}. "
+            f"Response: {response_text}"
+        ),
+    )
 
 
 async def fetch_github_repo(owner: str, repo: str):
 
-    url = f"https://api.github.com/repos/{owner}/{repo}"
+    url = f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}"
 
     async with httpx.AsyncClient(
-        timeout=10.0,
-        follow_redirects=True
+        timeout=20.0,
+        follow_redirects=True,
+        headers=get_github_headers(),
     ) as client:
 
         try:
-            response = await client.get(
-                url,
-                headers={
-                    "Accept": "application/vnd.github+json"
-                }
-            )
+            response = await client.get(url)
 
-        except httpx.RequestError:
+        except httpx.RequestError as exc:
             raise HTTPException(
                 status_code=502,
-                detail="Unable to connect to GitHub"
+                detail=f"Unable to connect to GitHub: {str(exc)}",
+            ) from exc
+
+        if response.status_code != 200:
+            _raise_github_error(
+                response,
+                "repository metadata request",
             )
 
-    if response.status_code == 404:
-        raise HTTPException(
-            status_code=404,
-            detail="GitHub repository not found"
-        )
+        data = response.json()
 
-    if response.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail="GitHub API request failed"
-        )
+        programming_languages = []
 
-    data = response.json()
+        languages_url = data.get("languages_url")
+
+        if languages_url:
+            try:
+                languages_response = await client.get(
+                    languages_url
+                )
+
+                if languages_response.status_code == 200:
+                    languages_payload = (
+                        languages_response.json() or {}
+                    )
+
+                    if isinstance(languages_payload, dict):
+                        programming_languages = sorted(
+                            languages_payload.keys()
+                        )
+
+                elif languages_response.status_code in (401, 403):
+                    _raise_github_error(
+                        languages_response,
+                        "repository languages request",
+                    )
+
+            except (httpx.RequestError, ValueError):
+                programming_languages = []
+
+        latest_commit_sha = None
+
+        default_branch = data.get("default_branch")
+
+        if default_branch:
+            encoded_branch = quote(
+                default_branch,
+                safe="",
+            )
+
+            commit_url = (
+                f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}"
+                f"/commits/{encoded_branch}"
+            )
+
+            try:
+                commit_response = await client.get(
+                    commit_url
+                )
+
+                if commit_response.status_code == 200:
+                    commit_data = (
+                        commit_response.json() or {}
+                    )
+
+                    if isinstance(commit_data, dict):
+                        latest_commit_sha = commit_data.get(
+                            "sha"
+                        )
+
+                elif commit_response.status_code in (401, 403):
+                    _raise_github_error(
+                        commit_response,
+                        "latest commit request",
+                    )
+
+            except (httpx.RequestError, ValueError):
+                latest_commit_sha = None
 
     return {
-        "name": data["name"],
-        "full_name": data["full_name"],
-        "description": data["description"],
-        "github_url": data["html_url"],
-        "stars": data["stargazers_count"],
-        "forks": data["forks_count"],
-        "language": data["language"],
-        "default_branch": data["default_branch"]
+        "name": data.get("name"),
+        "full_name": data.get("full_name"),
+        "description": data.get("description"),
+        "github_url": data.get("html_url"),
+        "stars": data.get("stargazers_count", 0),
+        "forks": data.get("forks_count", 0),
+        "language": data.get("language"),
+        "default_branch": default_branch,
+        "latest_commit_sha": latest_commit_sha,
+        "programming_languages": programming_languages,
     }
 
 
 def filter_repository_files(tree: list):
 
     selected_files = []
-
     total_size = 0
+    seen_paths = set()
 
     for file in tree:
-
-        # Only process actual files
 
         if file.get("type") != "blob":
             continue
 
-        path = file["path"]
+        path = file.get("path")
+
+        if not path or path in seen_paths:
+            continue
+
+        seen_paths.add(path)
 
         file_path = PurePosixPath(path)
-
-        file_name = file_path.name
-
         extension = file_path.suffix.lower()
 
-        # Exclude unwanted folders
-
-        if any(
-            directory in IGNORED_DIRECTORIES
-            for directory in file_path.parts
-        ):
+        if should_exclude_file(path):
             continue
-
-        # Exclude sensitive and unnecessary files
-
-        if file_name in IGNORED_FILES:
-            continue
-
-        # Check allowed extensions
 
         if extension not in ALLOWED_EXTENSIONS:
             continue
 
-        # Check file size
-
         file_size = file.get("size")
 
-        if file_size is None:
+        if not isinstance(file_size, int) or file_size < 0:
             continue
 
         if file_size > MAX_FILE_SIZE:
             continue
 
-        # Check maximum number of files
-
         if len(selected_files) >= MAX_FILES:
             break
-
-        # Check total ingestion size
 
         if total_size + file_size > MAX_TOTAL_SIZE:
             continue
 
         selected_files.append({
             "path": path,
-            "sha": file["sha"],
+            "sha": file.get("sha"),
             "size": file_size,
-            "url": file.get("url")
+            "url": file.get("url"),
         })
 
         total_size += file_size
@@ -207,69 +265,107 @@ def filter_repository_files(tree: list):
 
 async def fetch_github_tree(owner: str, repo: str):
 
-    repo_data = await fetch_github_repo(owner, repo)
+    repo_data = await fetch_github_repo(
+        owner,
+        repo,
+    )
 
     branch = repo_data["default_branch"]
 
-    encoded_branch = quote(branch, safe="")
+    if not branch:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "GitHub repository does not have "
+                "a default branch."
+            ),
+        )
+
+    encoded_branch = quote(
+        branch,
+        safe="",
+    )
 
     url = (
-        f"https://api.github.com/repos/{owner}/{repo}"
+        f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}"
         f"/git/trees/{encoded_branch}?recursive=1"
     )
 
     async with httpx.AsyncClient(
-        timeout=20.0,
-        follow_redirects=True
+        timeout=30.0,
+        follow_redirects=True,
+        headers=get_github_headers(),
     ) as client:
 
         try:
-            response = await client.get(
-                url,
-                headers={
-                    "Accept": "application/vnd.github+json"
-                }
-            )
+            response = await client.get(url)
 
-        except httpx.RequestError:
-
+        except httpx.RequestError as exc:
             raise HTTPException(
                 status_code=502,
-                detail="Unable to fetch GitHub repository tree"
-            )
-
-    if response.status_code == 404:
-        raise HTTPException(
-            status_code=404,
-            detail="GitHub repository tree not found"
-        )
+                detail=(
+                    "Unable to fetch GitHub repository tree: "
+                    f"{str(exc)}"
+                ),
+            ) from exc
 
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail="GitHub tree API request failed"
+        _raise_github_error(
+            response,
+            "repository tree request",
         )
 
     data = response.json()
 
     tree = data.get("tree", [])
 
+    if data.get("truncated", False):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "GitHub repository tree is truncated. "
+                "Complete repository discovery is not possible."
+            ),
+        )
+
     selected_files = filter_repository_files(tree)
 
+    for file_info in selected_files:
+
+        encoded_path = quote(
+            file_info["path"],
+            safe="/",
+        )
+
+        file_info["url"] = (
+            f"https://raw.githubusercontent.com/{owner}/{repo}/"
+            f"{encoded_branch}/{encoded_path}"
+        )
+
     total_files = sum(
-        1 for file in tree
+        1
+        for file in tree
         if file.get("type") == "blob"
     )
 
     return {
         "repository": repo_data["full_name"],
         "default_branch": branch,
-        "truncated": data["truncated"],
+        "tree_sha": data.get("sha"),
+        "latest_commit_sha": repo_data.get(
+            "latest_commit_sha"
+        ),
+        "languages": repo_data.get(
+            "programming_languages",
+            [],
+        ),
+        "truncated": False,
         "total_files": total_files,
         "included_files": len(selected_files),
         "skipped_files": total_files - len(selected_files),
         "total_size": sum(
-            file["size"] for file in selected_files
+            file["size"]
+            for file in selected_files
         ),
-        "files": selected_files
+        "files": selected_files,
     }
