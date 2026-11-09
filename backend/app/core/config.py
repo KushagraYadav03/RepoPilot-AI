@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     embedding_model: str = "gemini-embedding-001"
     embedding_batch_size: int = 16
 
+    # LLM Configuration
+    llm_provider: str = "gemini"
+    llm_model: str = "gemini-2.5-flash"
+
+
     # GitHub configuration
     github_token: str = ""
 
