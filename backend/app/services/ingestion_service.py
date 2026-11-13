@@ -2,7 +2,6 @@
 import asyncio
 import hashlib
 import logging
-from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import httpx
@@ -20,7 +19,9 @@ from app.services.qdrant_service import (
     delete_repository_points_by_ids,
     get_repository_file_point_ids,
     store_repository_embeddings,
+    update_repository_file_commit_sha,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ async def _delete_qdrant_points(
 async def _cleanup_new_points(
     point_ids: list[str],
 ) -> None:
-    """Best-effort cleanup of newly inserted vectors."""
+    """Best-effort cleanup of newly inserted Qdrant points."""
 
     if not point_ids:
         return
@@ -104,6 +105,77 @@ async def _cleanup_new_points(
         )
 
 
+def _attach_chunk_commit_metadata(
+    file_chunks: list[dict],
+    commit_sha: str | None,
+) -> None:
+    """Attach repository snapshot commit SHA to source chunks."""
+
+    for chunk in file_chunks:
+        if not isinstance(chunk, dict):
+            raise TypeError(
+                "Every repository chunk must be a dictionary."
+            )
+
+        if not chunk.get("commit_sha"):
+            chunk["commit_sha"] = commit_sha
+
+
+def _attach_embedding_metadata(
+    source_chunks: list[dict],
+    embedded_chunks: list[dict],
+) -> None:
+    """Preserve source metadata in embedding output."""
+
+    if len(source_chunks) != len(embedded_chunks):
+        raise RuntimeError(
+            "The number of generated embeddings does not match "
+            "the number of source chunks."
+        )
+
+    metadata_fields = (
+        "file_path",
+        "symbol_name",
+        "symbol_kind",
+        "start_line",
+        "end_line",
+        "commit_sha",
+        "content",
+    )
+
+    for source_chunk, embedded_chunk in zip(
+        source_chunks,
+        embedded_chunks,
+    ):
+        if not isinstance(embedded_chunk, dict):
+            raise TypeError(
+                "Every embedded chunk must be a dictionary."
+            )
+
+        metadata = embedded_chunk.get("metadata") or {}
+
+        if not isinstance(metadata, dict):
+            raise TypeError(
+                "Embedding metadata must be a dictionary."
+            )
+
+        metadata = dict(metadata)
+
+        for field in metadata_fields:
+            value = source_chunk.get(field)
+
+            if value is None:
+                continue
+
+            if embedded_chunk.get(field) is None:
+                embedded_chunk[field] = value
+
+            if metadata.get(field) is None:
+                metadata[field] = value
+
+        embedded_chunk["metadata"] = metadata
+
+
 async def process_ingestion_job(job_id: int):
 
     with SessionLocal() as db:
@@ -111,10 +183,14 @@ async def process_ingestion_job(job_id: int):
         job = db.get(IngestionJob, job_id)
 
         if job is None:
-            logger.error("Ingestion job %s not found", job_id)
+            logger.error(
+                "Ingestion job %s not found",
+                job_id,
+            )
             return
 
         pending_new_point_ids = []
+        obsolete_point_ids = []
 
         try:
             job.status = "processing"
@@ -133,26 +209,36 @@ async def process_ingestion_job(job_id: int):
                     "Repository not found or access denied"
                 )
 
-            parsed_url = urlparse(str(repository.github_url))
+            parsed_url = urlparse(
+                str(repository.github_url)
+            )
 
             if parsed_url.hostname not in {
                 "github.com",
                 "www.github.com",
             }:
-                raise ValueError("Invalid GitHub repository URL")
+                raise ValueError(
+                    "Invalid GitHub repository URL"
+                )
 
             path_parts = [
-                part for part in parsed_url.path.split("/") if part
+                part
+                for part in parsed_url.path.split("/")
+                if part
             ]
 
             if len(path_parts) != 2:
-                raise ValueError("Invalid GitHub repository URL")
+                raise ValueError(
+                    "Invalid GitHub repository URL"
+                )
 
             owner = path_parts[0]
             repo = path_parts[1].removesuffix(".git")
 
             if not owner or not repo:
-                raise ValueError("Invalid GitHub repository URL")
+                raise ValueError(
+                    "Invalid GitHub repository URL"
+                )
 
             logger.info(
                 "Starting ingestion job %s for %s/%s",
@@ -184,6 +270,10 @@ async def process_ingestion_job(job_id: int):
                 or repository.last_commit_sha
             )
 
+            current_commit_sha = (
+                repository.last_commit_sha
+            )
+
             languages = tree_data.get("languages") or []
 
             if languages:
@@ -193,7 +283,6 @@ async def process_ingestion_job(job_id: int):
 
             files = tree_data.get("files", [])
 
-            # Remove duplicate file paths.
             unique_files = []
             seen_paths = set()
 
@@ -215,7 +304,6 @@ async def process_ingestion_job(job_id: int):
             processed_count = 0
             current_paths = set(seen_paths)
 
-            # Process repository files.
             for file_info in unique_files:
 
                 file_path = file_info["path"]
@@ -227,7 +315,9 @@ async def process_ingestion_job(job_id: int):
                     job_id,
                 )
 
-                file_content = await fetch_file_content(file_url)
+                file_content = await fetch_file_content(
+                    file_url
+                )
 
                 processed_file = process_file(
                     file_path,
@@ -251,8 +341,13 @@ async def process_ingestion_job(job_id: int):
                     or file_path_value.rsplit("/", 1)[-1]
                 )
 
-                extension_value = processed_file.get("extension")
-                content_value = processed_file.get("content") or ""
+                extension_value = processed_file.get(
+                    "extension"
+                )
+
+                content_value = (
+                    processed_file.get("content") or ""
+                )
 
                 content_bytes = content_value.encode("utf-8")
 
@@ -279,31 +374,81 @@ async def process_ingestion_job(job_id: int):
                     )
                 )
 
-                # Skip unchanged files.
-                if (
-                    existing_file is not None
-                    and getattr(existing_file, "file_hash", "")
-                    == file_hash
-                ):
-                    processed_count += 1
-                    job.processed_files = processed_count
-
-                    logger.info(
-                        "Skipping unchanged file: %s",
-                        file_path_value,
+                existing_chunks = db.scalars(
+                    select(RepositoryChunk).where(
+                        RepositoryChunk.repository_id
+                        == job.repository_id,
+                        RepositoryChunk.file_path
+                        == file_path_value,
                     )
-                    continue
+                ).all()
 
-                # Preserve old point IDs until new vectors
-                # have been successfully stored.
-                old_point_ids = await _get_qdrant_file_point_ids(
-                    repository_id=job.repository_id,
-                    file_path=file_path_value,
+                file_content_unchanged = (
+                    existing_file is not None
+                    and getattr(
+                        existing_file,
+                        "file_hash",
+                        "",
+                    ) == file_hash
                 )
 
-                file_chunks = processed_file.get("chunks") or []
+                # Update missing commit SHA for unchanged files.
+                if file_content_unchanged:
+
+                    if current_commit_sha:
+
+                        # Update commit SHA in Qdrant.
+                        await asyncio.to_thread(
+                            update_repository_file_commit_sha,
+                            repository_id=job.repository_id,
+                            file_path=file_path_value,
+                            commit_sha=current_commit_sha,
+                        )
+
+                        # Update only missing commit SHA
+                        # in PostgreSQL chunks.
+                        for existing_chunk in existing_chunks:
+
+                            if not existing_chunk.commit_sha:
+                                existing_chunk.commit_sha = (
+                                    current_commit_sha
+                                )
+
+                    chunks_have_current_commit = all(
+                        chunk.commit_sha == current_commit_sha
+                        for chunk in existing_chunks
+                    )
+
+                    if chunks_have_current_commit:
+
+                        processed_count += 1
+                        job.processed_files = processed_count
+
+                        logger.info(
+                            "Skipping unchanged file after "
+                            "citation metadata update: %s",
+                            file_path_value,
+                        )
+                        continue
+
+                old_point_ids = (
+                    await _get_qdrant_file_point_ids(
+                        repository_id=job.repository_id,
+                        file_path=file_path_value,
+                    )
+                )
+
+                file_chunks = (
+                    processed_file.get("chunks") or []
+                )
+
+                _attach_chunk_commit_metadata(
+                    file_chunks,
+                    current_commit_sha,
+                )
 
                 embedded_chunks = []
+                stored_ids = []
 
                 if file_chunks:
 
@@ -318,6 +463,11 @@ async def process_ingestion_job(job_id: int):
                             f"{file_path_value}"
                         )
 
+                    _attach_embedding_metadata(
+                        file_chunks,
+                        embedded_chunks,
+                    )
+
                     stored_ids = await asyncio.to_thread(
                         store_repository_embeddings,
                         embedded_chunks,
@@ -331,8 +481,11 @@ async def process_ingestion_job(job_id: int):
                         )
 
                     if len(stored_ids) != len(embedded_chunks):
-                        # Clean up partial successful upsert.
-                        pending_new_point_ids.extend(stored_ids)
+                        pending_new_point_ids.extend(
+                            point_id
+                            for point_id in stored_ids
+                            if point_id not in old_point_ids
+                        )
 
                         raise RuntimeError(
                             f"Qdrant stored {len(stored_ids)} vectors, "
@@ -340,9 +493,12 @@ async def process_ingestion_job(job_id: int):
                             f"for {file_path_value}"
                         )
 
-                    pending_new_point_ids.extend(stored_ids)
+                    pending_new_point_ids.extend(
+                        point_id
+                        for point_id in stored_ids
+                        if point_id not in old_point_ids
+                    )
 
-                # Update PostgreSQL file metadata.
                 if existing_file is not None:
 
                     existing_file.file_name = file_name_value
@@ -369,20 +525,11 @@ async def process_ingestion_job(job_id: int):
                         )
                     )
 
-                # Replace PostgreSQL chunks.
-                existing_chunks = db.scalars(
-                    select(RepositoryChunk).where(
-                        RepositoryChunk.repository_id
-                        == job.repository_id,
-                        RepositoryChunk.file_path
-                        == file_path_value,
-                    )
-                ).all()
-
                 for old_chunk in existing_chunks:
                     db.delete(old_chunk)
 
                 for chunk in file_chunks:
+
                     db.add(
                         RepositoryChunk(
                             repository_id=job.repository_id,
@@ -409,24 +556,23 @@ async def process_ingestion_job(job_id: int):
                                 else 1
                             ),
                             content=chunk.get("content") or "",
-                            commit_sha=(
-                                chunk.get("commit_sha")
-                                or repository.last_commit_sha
+                            commit_sha=chunk.get(
+                                "commit_sha"
                             ),
                         )
                     )
 
-                # Remove only obsolete old points.
-                new_point_ids = set(stored_ids) if file_chunks else set()
+                new_point_ids = set(stored_ids)
 
-                obsolete_point_ids = [
+                file_obsolete_ids = [
                     point_id
                     for point_id in old_point_ids
                     if point_id not in new_point_ids
                 ]
 
-                # Defer deletion until PostgreSQL commit.
-                pending_file_cleanup = obsolete_point_ids
+                obsolete_point_ids.extend(
+                    file_obsolete_ids
+                )
 
                 processed_count += 1
                 job.processed_files = processed_count
@@ -437,16 +583,6 @@ async def process_ingestion_job(job_id: int):
                     job.total_files,
                 )
 
-                # Remember obsolete IDs for post-commit deletion.
-                if pending_file_cleanup:
-                    if not hasattr(job, "_obsolete_point_ids"):
-                        job._obsolete_point_ids = []
-
-                    job._obsolete_point_ids.extend(
-                        pending_file_cleanup
-                    )
-
-            # Remove files deleted from GitHub.
             existing_files = db.scalars(
                 select(RepositoryFile).where(
                     RepositoryFile.repository_id
@@ -469,7 +605,6 @@ async def process_ingestion_job(job_id: int):
 
                     db.delete(existing_file)
 
-            # Remove stale PostgreSQL chunks.
             stale_chunks = db.scalars(
                 select(RepositoryChunk).where(
                     RepositoryChunk.repository_id
@@ -481,29 +616,29 @@ async def process_ingestion_job(job_id: int):
                 if stale_chunk.file_path not in current_paths:
                     db.delete(stale_chunk)
 
+            obsolete_point_ids.extend(
+                deleted_file_point_ids
+            )
+
             job.processed_files = processed_count
             job.status = "completed"
             job.error_message = None
 
-            # Save all PostgreSQL changes first.
             db.commit()
 
-            # PostgreSQL commit succeeded.
             pending_new_point_ids.clear()
 
-            # Now remove obsolete Qdrant vectors.
-            obsolete_ids = getattr(
-                job,
-                "_obsolete_point_ids",
-                [],
-            )
-
-            obsolete_ids.extend(deleted_file_point_ids)
-
-            if obsolete_ids:
-                await _delete_qdrant_points(
-                    list(set(obsolete_ids))
+            if obsolete_point_ids:
+                deleted = await _delete_qdrant_points(
+                    list(set(obsolete_point_ids))
                 )
+
+                if not deleted:
+                    logger.error(
+                        "Unable to delete obsolete Qdrant points "
+                        "for ingestion job %s",
+                        job_id,
+                    )
 
             logger.info(
                 "Ingestion job %s completed. "
@@ -515,10 +650,8 @@ async def process_ingestion_job(job_id: int):
 
         except Exception as exc:
 
-            # Roll back PostgreSQL changes.
             db.rollback()
 
-            # Clean newly inserted Qdrant points.
             await _cleanup_new_points(
                 pending_new_point_ids
             )
@@ -528,7 +661,10 @@ async def process_ingestion_job(job_id: int):
                 job_id,
             )
 
-            failed_job = db.get(IngestionJob, job_id)
+            failed_job = db.get(
+                IngestionJob,
+                job_id,
+            )
 
             if failed_job is not None:
                 failed_job.status = "failed"

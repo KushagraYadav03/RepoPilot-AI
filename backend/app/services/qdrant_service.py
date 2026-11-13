@@ -70,42 +70,34 @@ def close_local_qdrant_clients() -> None:
     Existing persistent Qdrant data is not deleted.
     """
 
-    cached_clients = _get_cached_local_client.cache_info()
+    cache = _get_cached_local_client
 
     logger.info(
         "Closing cached Qdrant clients. Cache entries: %s",
-        cached_clients.currsize,
+        cache.cache_info().currsize,
     )
 
-    # Save references before clearing the cache.
-    # This ensures clients remain accessible for explicit close().
-    clients = []
-
-    # The current application uses one configured local path.
     normalized_path = str(
         Path(settings.qdrant_path).expanduser().resolve()
     )
 
-    client = _get_cached_local_client.cache_info()
+    clients = []
 
-    if client.currsize > 0:
+    if cache.cache_info().currsize > 0:
         try:
-            cached_client = _get_cached_local_client(
-                normalized_path
-            )
-            clients.append(cached_client)
+            client = cache(normalized_path)
+            clients.append(client)
 
         except Exception:
             logger.exception(
                 "Unable to retrieve cached Qdrant client"
             )
 
-    # Clear the cache after retrieving the client reference.
-    _get_cached_local_client.cache_clear()
+    cache.cache_clear()
 
-    for cached_client in clients:
+    for client in clients:
         try:
-            cached_client.close()
+            client.close()
 
             logger.info(
                 "Local Qdrant client closed successfully"
@@ -573,6 +565,49 @@ class QdrantVectorStore:
         return point_ids
 
     # -----------------------------------------------------
+    # UPDATE EXISTING FILE COMMIT SHA
+    # -----------------------------------------------------
+
+    def update_repository_file_commit_sha(
+        self,
+        repository_id: int,
+        file_path: str,
+        commit_sha: str,
+    ) -> bool:
+
+        if not commit_sha:
+            return False
+
+        if not self._collection_exists():
+            return False
+
+        self.client.set_payload(
+            collection_name=self.collection_name,
+            payload={
+                "commit_sha": commit_sha,
+            },
+            points=Filter(
+                must=[
+                    FieldCondition(
+                        key="repository_id",
+                        match=MatchValue(
+                            value=int(repository_id),
+                        ),
+                    ),
+                    FieldCondition(
+                        key="file_path",
+                        match=MatchValue(
+                            value=file_path,
+                        ),
+                    ),
+                ]
+            ),
+            wait=True,
+        )
+
+        return True
+
+    # -----------------------------------------------------
     # DELETE FILE VECTORS
     # -----------------------------------------------------
 
@@ -599,7 +634,7 @@ class QdrantVectorStore:
                         FieldCondition(
                             key="file_path",
                             match=MatchValue(
-                                value=file_path
+                                value=file_path,
                             ),
                         ),
                     ]
@@ -771,3 +806,23 @@ def delete_repository_points_by_ids(
     store = QdrantVectorStore(**kwargs)
 
     return store.delete_points_by_ids(point_ids)
+
+
+# ---------------------------------------------------------
+# UPDATE FILE COMMIT SHA PUBLIC WRAPPER
+# ---------------------------------------------------------
+
+def update_repository_file_commit_sha(
+    repository_id: int,
+    file_path: str,
+    commit_sha: str,
+    **kwargs: Any,
+) -> bool:
+
+    store = QdrantVectorStore(**kwargs)
+
+    return store.update_repository_file_commit_sha(
+        repository_id=repository_id,
+        file_path=file_path,
+        commit_sha=commit_sha,
+    )
