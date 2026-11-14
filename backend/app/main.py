@@ -17,9 +17,10 @@ from app.api.routes.repositories import router as repositories_router
 from app.api.routes.ingestion import router as ingestion_router
 from app.api.routes.github import router as github_router
 from app.api.routes.retrieval import router as retrieval_router
+from app.api.routes.chat import router as chat_router
+from app.api.routes.conversations import router as conversations_router
 
 from app.services.qdrant_service import close_local_qdrant_clients
-from app.api.routes.chat import router as chat_router
 
 
 settings = get_settings()
@@ -61,6 +62,7 @@ app.include_router(ingestion_router)
 app.include_router(github_router)
 app.include_router(retrieval_router)
 app.include_router(chat_router)
+app.include_router(conversations_router)
 
 
 # ---------------------------------------------------------

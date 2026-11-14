@@ -37,10 +37,7 @@ async def chat_with_repository(
     current_user_id: int = Depends(get_current_user_id),
 ):
 
-    user_id = resolve_user_id(
-        db,
-        current_user_id,
-    )
+    user_id = resolve_user_id(current_user_id)
 
     repository = db.get(
         Repository,
@@ -70,11 +67,11 @@ async def chat_with_repository(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
-        )
+        ) from exc
 
     except RuntimeError as exc:
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
-        )
+        ) from exc
