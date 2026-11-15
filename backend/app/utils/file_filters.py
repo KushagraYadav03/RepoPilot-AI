@@ -1,4 +1,3 @@
-
 import re
 from pathlib import PurePosixPath
 
@@ -55,6 +54,8 @@ EXCLUDED_DIRS = {
     "venv", "env", "dist", "build", ".next",
     ".pytest_cache", ".mypy_cache", ".idea",
     ".vscode", "coverage",
+    # Noise for code Q&A
+    "alembic", "migrations", "tests", "test", "__tests__",
 }
 
 

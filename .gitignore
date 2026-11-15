@@ -18,3 +18,4 @@ dist/
 
 # VS Code
 .vscode/
+backend/qdrant_data/
