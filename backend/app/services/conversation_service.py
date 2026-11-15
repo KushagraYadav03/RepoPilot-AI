@@ -1,4 +1,4 @@
-
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from app.repositories.conversation_repository import (
@@ -19,6 +19,9 @@ from app.services.rag_service import answer_repository_question
 MAX_CONVERSATIONS_PER_USER = 50
 MAX_MESSAGES_PER_CONVERSATION = 100
 MAX_MESSAGE_LENGTH = 10000
+
+# How many previous messages are passed to RAG as context.
+HISTORY_MESSAGE_LIMIT = 6
 
 
 def create_user_conversation(
@@ -161,6 +164,19 @@ async def send_conversation_message(
             "Maximum message limit reached for this conversation"
         )
 
+    # Collect recent history BEFORE storing the new user message,
+    # so follow-up questions have the context they need.
+
+    history = [
+        {
+            "role": message.role,
+            "content": message.content,
+        }
+        for message in list(
+            get_conversation_messages(db, conversation_id)
+        )[-HISTORY_MESSAGE_LIMIT:]
+    ]
+
     # Store the user message first.
 
     user_message = create_message(
@@ -171,12 +187,24 @@ async def send_conversation_message(
     )
 
     # Generate the AI response using the existing RAG pipeline.
+    # If it fails, remove the user message so it does not stay
+    # without an answer and use up the message limit.
 
-    result = await answer_repository_question(
-        repository_id=conversation.repository_id,
-        query=content,
-        limit=5,
-    )
+    try:
+        result = await answer_repository_question(
+            repository_id=conversation.repository_id,
+            query=content,
+            limit=5,
+            history=history,
+        )
+    except Exception:
+        db.rollback()
+
+        if sa_inspect(user_message).persistent:
+            db.delete(user_message)
+            db.commit()
+
+        raise
 
     # Update conversation title using its first question.
 

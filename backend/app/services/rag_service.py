@@ -1,4 +1,3 @@
-
 from typing import Any
 
 from app.services.llm.factory import get_llm_provider
@@ -16,6 +15,7 @@ async def answer_repository_question(
     query: str,
     limit: int = 5,
     score_threshold: float | None = None,
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
 
     if repository_id <= 0:
@@ -28,9 +28,22 @@ async def answer_repository_question(
             "Question cannot be empty"
         )
 
+    # Use the last two user questions as extra retrieval context,
+    # so follow-ups like "where is its test?" still find the right chunks.
+
+    previous_questions = [
+        message["content"]
+        for message in (history or [])
+        if message.get("role") == "user"
+    ][-2:]
+
+    retrieval_query = "\n".join(
+        previous_questions + [query]
+    )[:2000]
+
     retrieved_chunks = retrieve_repository_chunks(
         repository_id=repository_id,
-        query=query,
+        query=retrieval_query,
         limit=limit,
         score_threshold=score_threshold,
     )
@@ -50,6 +63,19 @@ async def answer_repository_question(
         query=query,
         retrieved_chunks=retrieved_chunks,
     )
+
+    # Give the LLM the recent conversation so it can resolve
+    # references like "it", "that function" or "explain more".
+
+    if history:
+        transcript = "\n".join(
+            f"{message['role'].upper()}: {message['content'][:500]}"
+            for message in history
+        )
+
+        prompt = (
+            f"Previous conversation:\n{transcript}\n\n{prompt}"
+        )
 
     provider = get_llm_provider()
 
