@@ -1,4 +1,4 @@
-
+from datetime import datetime
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints
@@ -24,6 +24,6 @@ class RepositoryResponse(BaseModel):
     tree_sha: str | None = None
     last_commit_sha: str | None = None
     programming_languages: str | None = None
-    last_synced_at: str | None = None
+    last_synced_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)

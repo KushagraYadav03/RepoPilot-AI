@@ -1,7 +1,8 @@
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +32,27 @@ def register_exception_handlers(app: FastAPI):
             }
         )
 
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(
+        request: Request,
+        exc: StarletteHTTPException,
+    ):
+        # Let FastAPI's built-in HTTP error responses pass through correctly.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None),
+        )
+
     @app.exception_handler(Exception)
     async def unexpected_error(
         request: Request,
         exc: Exception
     ):
+        # Re-raise HTTPException so it is handled by the handler above.
+        if isinstance(exc, (HTTPException, StarletteHTTPException)):
+            return await http_exception_handler(request, exc)
+
         logger.exception("Unexpected server error")
 
         return JSONResponse(

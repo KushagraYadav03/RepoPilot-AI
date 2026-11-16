@@ -1,5 +1,4 @@
-﻿
-import argparse
+﻿import argparse
 import json
 import math
 import shutil
@@ -431,6 +430,7 @@ def main():
     print("Existing Qdrant points:", len(old_records))
     print("Qdrant vector dimension:", vector_dimension)
 
+    # DYNAMIC DIMENSION CHECK: Check against settings.embedding_dimension (768 for Jina)
     if vector_dimension != settings.embedding_dimension:
         raise RuntimeError(
             f"Expected {settings.embedding_dimension} dimensions, got {vector_dimension}."
@@ -475,7 +475,7 @@ def main():
     print("\n========== EMBEDDING PLAN ==========")
     print("Total chunks:", len(chunks))
     print("Valid checkpoint embeddings:", len(cached))
-    print("New Gemini embeddings:", len(pending_chunks))
+    print("New embeddings to generate:", len(pending_chunks))
 
     checkpoint_embeddings = {
         str(chunk_id): item
@@ -562,7 +562,7 @@ def main():
                 "Generated embedding IDs do not match pending chunks."
             )
 
-    # STEP 6: VALIDATE ALL 76 CHECKPOINT ENTRIES
+    # STEP 6: VALIDATE ALL CHECKPOINT ENTRIES
 
     if len(checkpoint_embeddings) != len(chunks):
         raise RuntimeError(
@@ -647,7 +647,7 @@ def main():
 
     print("Backup completed.")
 
-    # STEP 8: UPSERT ALL 76 FRESH POINTS
+    # STEP 8: UPSERT ALL FRESH POINTS
 
     client = QdrantClient(path=str(qdrant_path))
 

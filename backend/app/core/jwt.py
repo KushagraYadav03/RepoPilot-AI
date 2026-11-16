@@ -1,4 +1,4 @@
-
+import logging
 import os
 
 from datetime import datetime, timedelta, timezone
@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from jwt.exceptions import InvalidTokenError
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 ALGORITHM = "HS256"
@@ -45,21 +47,18 @@ def verify_access_token(token: str):
             algorithms=[ALGORITHM]
         )
 
-        # Temporary debugging
-        print("JWT PAYLOAD:", payload)
-
         if payload.get("type") != "access":
-            print("ERROR: Wrong token type")
+            logger.warning("JWT verification failed: wrong token type")
             return None
 
         user_id = payload.get("sub")
 
         if not isinstance(user_id, str) or not user_id.isdigit():
-            print("ERROR: Invalid user ID:", user_id)
+            logger.warning("JWT verification failed: invalid user ID: %s", user_id)
             return None
 
         return int(user_id)
 
     except InvalidTokenError as error:
-        print("JWT VERIFICATION ERROR:", repr(error))
+        logger.debug("JWT verification error: %s", repr(error))
         return None

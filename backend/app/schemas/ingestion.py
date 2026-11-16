@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class IngestionStartRequest(BaseModel):
@@ -8,6 +8,8 @@ class IngestionStartRequest(BaseModel):
 
 
 class IngestionJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     repository_id: int
     user_id: int
