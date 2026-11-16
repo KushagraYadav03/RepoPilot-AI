@@ -20,16 +20,18 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     embedding_model: str = "gemini-embedding-001"
     embedding_batch_size: int = 16
+    embedding_max_retries: int = 3
+    embedding_retry_base_seconds: float = 2.0
+    embedding_request_timeout: float = 60.0
 
-    # LLM Configuration
+    # LLM configuration
     llm_provider: str = "gemini"
     llm_model: str = "gemini-2.5-flash"
-
 
     # GitHub configuration
     github_token: str = ""
 
-    # Qdrant configuration
+    # Qdrant local persistent storage
     qdrant_path: str = str(
         Path(__file__).resolve().parents[2] / "qdrant_data"
     )

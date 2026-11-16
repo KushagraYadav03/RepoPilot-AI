@@ -330,18 +330,6 @@ async def fetch_github_tree(owner: str, repo: str):
 
     selected_files = filter_repository_files(tree)
 
-    for file_info in selected_files:
-
-        encoded_path = quote(
-            file_info["path"],
-            safe="/",
-        )
-
-        file_info["url"] = (
-            f"https://raw.githubusercontent.com/{owner}/{repo}/"
-            f"{encoded_branch}/{encoded_path}"
-        )
-
     total_files = sum(
         1
         for file in tree

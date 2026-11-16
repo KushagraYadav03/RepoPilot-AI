@@ -39,6 +39,7 @@ def _chunk_python_code(file_path, text, commit_sha=None):
     lines = text.splitlines()
     chunks = []
 
+    # Collect class, function and async function definitions.
     for node in ast.walk(tree):
         if not isinstance(
             node,
@@ -49,9 +50,7 @@ def _chunk_python_code(file_path, text, commit_sha=None):
         start_line = node.lineno
         end_line = getattr(node, "end_lineno", start_line)
 
-        content = "\n".join(
-            lines[start_line - 1:end_line]
-        )
+        content = "\n".join(lines[start_line - 1:end_line])
 
         symbol_kind = (
             "class"
@@ -71,7 +70,41 @@ def _chunk_python_code(file_path, text, commit_sha=None):
             )
         )
 
-    # Python scripts may contain no classes or functions.
+    # Preserve module-level code such as imports,
+    # constants, global variables and executable statements.
+    module_nodes = [
+        node
+        for node in tree.body
+        if not isinstance(
+            node,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        )
+    ]
+
+    if module_nodes:
+        start_line = min(node.lineno for node in module_nodes)
+        end_line = max(
+            getattr(node, "end_lineno", node.lineno)
+            for node in module_nodes
+        )
+
+        content = "\n".join(lines[start_line - 1:end_line])
+
+        if content.strip():
+            chunks.append(
+                _build_chunk(
+                    file_path=file_path,
+                    symbol_name="__module__",
+                    symbol_kind="module",
+                    start_line=start_line,
+                    end_line=end_line,
+                    content=content,
+                    commit_sha=commit_sha,
+                )
+            )
+
+    # Files with no definitions or module-level chunks
+    # still get line-based chunks.
     if not chunks:
         return _chunk_by_lines(file_path, text, commit_sha)
 
@@ -80,6 +113,7 @@ def _chunk_python_code(file_path, text, commit_sha=None):
         key=lambda chunk: (
             chunk["start_line"],
             chunk["end_line"],
+            chunk["symbol_kind"],
         ),
     )
 
@@ -100,9 +134,7 @@ def _chunk_by_lines(
     start = 0
 
     while start < len(lines):
-
         end = min(start + max_lines, len(lines))
-
         content = "\n".join(lines[start:end])
 
         if content.strip():
@@ -145,8 +177,6 @@ def chunk_code(
             commit_sha,
         )
 
-    # Java, JavaScript, TypeScript, Markdown,
-    # JSON, YAML and other supported files.
     return _chunk_by_lines(
         file_path,
         code_text,

@@ -15,7 +15,7 @@ from app.services.retrieval_service import (
 
 
 REPOSITORY_ID = 1
-TOP_K = 5
+TOP_K = 20
 
 
 evaluation_cases = [
@@ -208,3 +208,4 @@ if total:
     )
 
 print("=" * 70)
+

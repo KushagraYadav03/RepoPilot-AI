@@ -1,6 +1,7 @@
-
+﻿
 import asyncio
 import hashlib
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -23,6 +24,7 @@ class FakeDB:
         self.chunks = []
         self.commits = []
         self.rollback_called = False
+        self.next_chunk_id = 1
 
     def __enter__(self):
         return self
@@ -57,6 +59,12 @@ class FakeDB:
             return FakeScalarResult(self.files)
 
         return FakeScalarResult([])
+
+    def flush(self):
+        for chunk in self.chunks:
+            if getattr(chunk, "id", None) is None:
+                chunk.id = self.next_chunk_id
+                self.next_chunk_id += 1
 
     def delete(self, instance):
         if instance in self.files:
@@ -151,6 +159,47 @@ def create_chunk():
     }
 
 
+def create_existing_chunk(chunk_id=101):
+    chunk = create_chunk()
+
+    return SimpleNamespace(
+        id=chunk_id,
+        repository_id=10,
+        file_path=chunk["file_path"],
+        symbol_name=chunk["symbol_name"],
+        symbol_kind=chunk["symbol_kind"],
+        start_line=chunk["start_line"],
+        end_line=chunk["end_line"],
+        content=chunk["content"],
+        commit_sha=chunk["commit_sha"],
+    )
+
+
+def create_existing_file(content="print('hello')\n"):
+    return SimpleNamespace(
+        repository_id=10,
+        file_path="app/main.py",
+        file_name="main.py",
+        file_hash=hashlib.sha256(
+            content.encode("utf-8")
+        ).hexdigest(),
+        extension=".py",
+        content=content,
+        size=len(content.encode("utf-8")),
+        line_count=len(content.splitlines()),
+        ingestion_job_id=None,
+    )
+
+
+def expected_point_id(chunk_id):
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"repopilot-point-id:{chunk_id}",
+        )
+    )
+
+
 def mock_common_dependencies(monkeypatch, db, tree_data):
     monkeypatch.setattr(
         ingestion_service,
@@ -191,10 +240,15 @@ def mock_common_dependencies(monkeypatch, db, tree_data):
     monkeypatch.setattr(
         ingestion_service,
         "embed_repository_chunks",
-        Mock(side_effect=lambda chunks: [
-            {**chunk, "embedding": [0.1, 0.2, 0.3]}
-            for chunk in chunks
-        ]),
+        Mock(
+            side_effect=lambda chunks: [
+                {
+                    **chunk,
+                    "embedding": [0.1, 0.2, 0.3],
+                }
+                for chunk in chunks
+            ]
+        ),
     )
 
 
@@ -291,6 +345,19 @@ def test_ingestion_calls_embedding_service_with_chunk_payload(
     assert job.processed_files == 1
     assert len(db.chunks) == 1
 
+    assert db.chunks[0].id == 1
+    assert embedded_chunks[0]["id"] == db.chunks[0].id
+
+    assert (
+        embedded_chunks[0]["repository_chunk_id"]
+        == db.chunks[0].id
+    )
+
+    assert (
+        embedded_chunks[0]["metadata"]["repository_chunk_id"]
+        == db.chunks[0].id
+    )
+
 
 def test_ingestion_job_not_found(monkeypatch):
     db = FakeDB(job=None)
@@ -340,6 +407,7 @@ def test_ingestion_repository_not_found(monkeypatch):
     )
 
     assert job.status == "failed"
+
     assert job.error_message == (
         "Repository not found or access denied"
     )
@@ -426,18 +494,7 @@ def test_index_refresh_deletes_only_obsolete_points(monkeypatch):
     repository = create_repository()
     db = FakeDB(job, repository)
 
-    existing_file = SimpleNamespace(
-        repository_id=10,
-        file_path="app/main.py",
-        file_name="main.py",
-        file_hash="old-hash",
-        extension=".py",
-        content="old content",
-        size=12,
-        line_count=1,
-        ingestion_job_id=None,
-    )
-
+    existing_file = create_existing_file("old content")
     db.files.append(existing_file)
 
     first_chunk = create_chunk()
@@ -461,7 +518,9 @@ def test_index_refresh_deletes_only_obsolete_points(monkeypatch):
     monkeypatch.setattr(
         ingestion_service,
         "fetch_file_content",
-        AsyncMock(return_value=new_content.encode("utf-8")),
+        AsyncMock(
+            return_value=new_content.encode("utf-8")
+        ),
     )
 
     monkeypatch.setattr(
@@ -514,9 +573,15 @@ def test_index_refresh_deletes_only_obsolete_points(monkeypatch):
     ).hexdigest()
 
     assert job.status == "completed"
+    assert len(db.chunks) == 2
+
+    assert all(
+        chunk.id is not None
+        for chunk in db.chunks
+    )
 
 
-def test_unchanged_file_skips_embedding_and_qdrant_refresh(
+def test_unchanged_file_is_skipped_when_qdrant_is_consistent(
     monkeypatch,
 ):
     job = create_job()
@@ -524,20 +589,7 @@ def test_unchanged_file_skips_embedding_and_qdrant_refresh(
     db = FakeDB(job, repository)
 
     content = "print('hello')\n"
-
-    existing_file = SimpleNamespace(
-        repository_id=10,
-        file_path="app/main.py",
-        file_name="main.py",
-        file_hash=hashlib.sha256(
-            content.encode("utf-8")
-        ).hexdigest(),
-        extension=".py",
-        content=content,
-        size=len(content),
-        line_count=1,
-        ingestion_job_id=None,
-    )
+    existing_file = create_existing_file(content)
 
     db.files.append(existing_file)
 
@@ -550,6 +602,7 @@ def test_unchanged_file_skips_embedding_and_qdrant_refresh(
     process_mock = Mock(
         return_value=create_processed_file(
             content=content,
+            chunks=[],
         )
     )
 
@@ -563,13 +616,161 @@ def test_unchanged_file_skips_embedding_and_qdrant_refresh(
         ingestion_service.process_ingestion_job(1)
     )
 
+    process_mock.assert_called_once()
+
+    ingestion_service.get_repository_file_point_ids.assert_called_once_with(
+        repository_id=10,
+        file_path="app/main.py",
+    )
+
     ingestion_service.embed_repository_chunks.assert_not_called()
     ingestion_service.store_repository_embeddings.assert_not_called()
-    ingestion_service.get_repository_file_point_ids.assert_not_called()
     ingestion_service.delete_repository_points_by_ids.assert_not_called()
 
     assert job.status == "completed"
     assert job.processed_files == 1
+    assert len(db.files) == 1
+
+
+def test_unchanged_file_repairs_missing_qdrant_points_and_preserves_chunk_id(
+    monkeypatch,
+):
+    job = create_job()
+    repository = create_repository()
+    db = FakeDB(job, repository)
+
+    content = "def main():\n    return 'ok'\n"
+
+    existing_file = create_existing_file(content)
+    existing_chunk = create_existing_chunk(chunk_id=101)
+
+    db.files.append(existing_file)
+    db.chunks.append(existing_chunk)
+
+    chunk = create_chunk()
+
+    mock_common_dependencies(
+        monkeypatch,
+        db,
+        create_tree_data(),
+    )
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "fetch_file_content",
+        AsyncMock(return_value=content.encode("utf-8")),
+    )
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "process_file",
+        lambda path, file_content: create_processed_file(
+            path=path,
+            content=file_content.decode("utf-8"),
+            chunks=[chunk],
+        ),
+    )
+
+    expected_id = expected_point_id(101)
+
+    store_mock = Mock(return_value=[expected_id])
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "store_repository_embeddings",
+        store_mock,
+    )
+
+    asyncio.run(
+        ingestion_service.process_ingestion_job(1)
+    )
+
+    assert job.status == "completed"
+
+    # Existing PostgreSQL chunk must not be deleted or recreated.
+    assert len(db.chunks) == 1
+    assert db.chunks[0] is existing_chunk
+    assert db.chunks[0].id == 101
+
+    # Embedding must be generated for the missing Qdrant point.
+    ingestion_service.embed_repository_chunks.assert_called_once()
+
+    stored_chunks = store_mock.call_args.args[0]
+
+    assert len(stored_chunks) == 1
+    assert stored_chunks[0]["id"] == 101
+    assert stored_chunks[0]["repository_chunk_id"] == 101
+    assert stored_chunks[0]["metadata"]["repository_chunk_id"] == 101
+
+    # Existing points were empty, so no old point should be deleted.
+    ingestion_service.delete_repository_points_by_ids.assert_not_called()
+
+
+def test_unchanged_file_repairs_qdrant_when_point_ids_are_wrong(
+    monkeypatch,
+):
+    job = create_job()
+    repository = create_repository()
+    db = FakeDB(job, repository)
+
+    content = "def main():\n    return 'ok'\n"
+
+    existing_file = create_existing_file(content)
+    existing_chunk = create_existing_chunk(chunk_id=101)
+
+    db.files.append(existing_file)
+    db.chunks.append(existing_chunk)
+
+    chunk = create_chunk()
+
+    mock_common_dependencies(
+        monkeypatch,
+        db,
+        create_tree_data(),
+    )
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "fetch_file_content",
+        AsyncMock(return_value=content.encode("utf-8")),
+    )
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "process_file",
+        lambda path, file_content: create_processed_file(
+            path=path,
+            content=file_content.decode("utf-8"),
+            chunks=[chunk],
+        ),
+    )
+
+    old_point_id = "legacy-point"
+    new_point_id = expected_point_id(101)
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "get_repository_file_point_ids",
+        Mock(return_value=[old_point_id]),
+    )
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "store_repository_embeddings",
+        Mock(return_value=[new_point_id]),
+    )
+
+    asyncio.run(
+        ingestion_service.process_ingestion_job(1)
+    )
+
+    assert job.status == "completed"
+    assert len(db.chunks) == 1
+    assert db.chunks[0].id == 101
+
+    ingestion_service.delete_repository_points_by_ids.assert_called_once_with(
+        point_ids=[old_point_id],
+    )
 
 
 def test_embedding_failure_preserves_old_qdrant_points(
@@ -627,17 +828,8 @@ def test_deleted_github_file_removes_old_vectors(monkeypatch):
     repository = create_repository()
     db = FakeDB(job, repository)
 
-    deleted_file = SimpleNamespace(
-        repository_id=10,
-        file_path="app/removed.py",
-        file_name="removed.py",
-        file_hash="old-hash",
-        extension=".py",
-        content="old content",
-        size=12,
-        line_count=1,
-        ingestion_job_id=None,
-    )
+    deleted_file = create_existing_file("old content")
+    deleted_file.file_path = "app/removed.py"
 
     db.files.append(deleted_file)
 
@@ -659,6 +851,11 @@ def test_deleted_github_file_removes_old_vectors(monkeypatch):
 
     assert job.status == "completed"
     assert deleted_file not in db.files
+
+    ingestion_service.get_repository_file_point_ids.assert_called_once_with(
+        repository_id=10,
+        file_path="app/removed.py",
+    )
 
     ingestion_service.delete_repository_points_by_ids.assert_called_once_with(
         point_ids=["deleted-point"],
