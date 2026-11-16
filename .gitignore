@@ -19,3 +19,6 @@ dist/
 # VS Code
 .vscode/
 backend/qdrant_data/
+
+# FastEmbed model cache
+/backend/fastembed_cache/

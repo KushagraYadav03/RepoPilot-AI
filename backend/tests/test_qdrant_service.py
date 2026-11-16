@@ -1,6 +1,6 @@
 
-from types import SimpleNamespace
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from qdrant_client import QdrantClient
@@ -151,7 +151,7 @@ def test_qdrant_service_upserts_repository_metadata_and_vectors():
     fake_client = FakeQdrantClient()
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -166,7 +166,7 @@ def test_qdrant_service_upserts_repository_metadata_and_vectors():
 
     upsert_call = fake_client.upsert_calls[0]
 
-    assert upsert_call["collection_name"] == "repo_chunks"
+    assert upsert_call["collection_name"] == "repo_chunks_jina"
 
     point = upsert_call["points"][0]
     payload = point.payload
@@ -191,7 +191,7 @@ def test_same_chunk_generates_same_point_id():
     fake_client = FakeQdrantClient()
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -215,7 +215,7 @@ def test_qdrant_service_searches_only_repository_scoped_points():
     prepare_existing_collection(fake_client)
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -229,7 +229,7 @@ def test_qdrant_service_searches_only_repository_scoped_points():
 
     query_call = fake_client.query_calls[0]
 
-    assert query_call["collection_name"] == "repo_chunks"
+    assert query_call["collection_name"] == "repo_chunks_jina"
     assert query_call["query"] == [0.1, 0.2, 0.3]
     assert query_call["limit"] == 5
     assert query_call["with_payload"] is True
@@ -248,7 +248,7 @@ def test_qdrant_service_deletes_repository_file_vectors():
     prepare_existing_collection(fake_client)
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -262,7 +262,7 @@ def test_qdrant_service_deletes_repository_file_vectors():
 
     delete_call = fake_client.delete_calls[0]
 
-    assert delete_call["collection_name"] == "repo_chunks"
+    assert delete_call["collection_name"] == "repo_chunks_jina"
 
     conditions = (
         delete_call["points_selector"].filter.must
@@ -280,7 +280,7 @@ def test_qdrant_service_skips_empty_vectors():
     fake_client = FakeQdrantClient()
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -299,7 +299,7 @@ def test_qdrant_service_rejects_different_vector_dimensions():
     fake_client = FakeQdrantClient()
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -325,7 +325,7 @@ def test_qdrant_service_rejects_missing_repository_chunk_id():
     fake_client = FakeQdrantClient()
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -345,7 +345,7 @@ def test_qdrant_service_rejects_duplicate_chunk_ids():
     fake_client = FakeQdrantClient()
 
     service = QdrantVectorStore(
-        collection_name="repo_chunks",
+        collection_name="repo_chunks_jina",
         client=fake_client,
     )
 
@@ -461,6 +461,12 @@ def test_qdrant_payload_chunk_id_persisted_and_read_back():
 
         point = get_test_point()
 
+        point["embedding_model"] = (
+            "jinaai/jina-embeddings-v2-base-code"
+        )
+
+        point["embedding_dimension"] = 3
+
         inserted_ids = service.upsert_points([point])
 
         assert len(inserted_ids) == 1
@@ -480,6 +486,20 @@ def test_qdrant_payload_chunk_id_persisted_and_read_back():
         assert payload["repository_id"] == 7
         assert payload["repository_chunk_id"] == 101
         assert payload["metadata"]["repository_chunk_id"] == 101
+
+        # Verify top-level embedding metadata.
+        assert payload["embedding_model"] == (
+            "jinaai/jina-embeddings-v2-base-code"
+        )
+
+        assert payload["embedding_dimension"] == 3
+
+        # Verify nested embedding metadata.
+        assert payload["metadata"]["embedding_model"] == (
+            "jinaai/jina-embeddings-v2-base-code"
+        )
+
+        assert payload["metadata"]["embedding_dimension"] == 3
 
         expected_id = QdrantVectorStore._get_point_id(
             {"repository_chunk_id": 101}

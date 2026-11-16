@@ -15,6 +15,7 @@ from app.models.repository import Repository
 from app.models.ingestion_job import IngestionJob
 
 import app.api.routes.ingestion as ingestion_routes
+import app.api.routes.repositories as repositories_routes
 
 
 # Test database: in-memory SQLite
@@ -35,7 +36,21 @@ TestingSessionLocal = sessionmaker(
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+
+    async def mock_ingest(job_id: int):
+        pass
+
+    monkeypatch.setattr(
+        repositories_routes,
+        "process_ingestion_job",
+        mock_ingest,
+    )
+    monkeypatch.setattr(
+        ingestion_routes,
+        "process_ingestion_job",
+        mock_ingest,
+    )
 
     Base.metadata.create_all(bind=engine)
 

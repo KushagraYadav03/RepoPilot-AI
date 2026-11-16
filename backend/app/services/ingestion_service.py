@@ -21,7 +21,10 @@ from app.models.repository_file import RepositoryFile
 
 from app.services.embedding_service import embed_repository_chunks
 from app.services.file_processor import process_file
-from app.services.git_service import fetch_github_tree
+from app.services.git_service import (
+    fetch_github_tree,
+    get_github_headers,
+)
 
 from app.services.qdrant_service import (
     delete_repository_points_by_ids,
@@ -39,10 +42,7 @@ logger = logging.getLogger(__name__)
 
 async def fetch_file_content(file_url: str) -> bytes:
 
-    headers = {
-        "User-Agent": "RepoPilot-AI",
-        "Accept": "application/vnd.github+json",
-    }
+    headers = get_github_headers()
 
     async with httpx.AsyncClient(
         timeout=30.0,
@@ -185,10 +185,6 @@ async def _cleanup_new_points(
 def _expected_qdrant_point_ids(
     existing_chunks: list,
 ) -> set[str]:
-    """
-    Generate expected deterministic Qdrant IDs
-    from actual PostgreSQL chunk IDs.
-    """
 
     expected_ids = set()
 
@@ -216,10 +212,6 @@ def _check_qdrant_consistency(
     actual_point_ids: list[str],
     file_path: str,
 ) -> bool:
-    """
-    Compare expected PostgreSQL-derived UUIDs
-    with actual Qdrant point IDs.
-    """
 
     expected_ids = _expected_qdrant_point_ids(
         existing_chunks
@@ -404,12 +396,6 @@ def _attach_existing_chunk_ids(
     existing_chunks: list,
     embedded_chunks: list[dict],
 ) -> None:
-    """
-    Reuse existing PostgreSQL IDs when file content
-    has not changed and only Qdrant needs repair.
-
-    No PostgreSQL chunk recreation is performed.
-    """
 
     records_by_identity = defaultdict(deque)
 
@@ -543,6 +529,39 @@ def _insert_chunks_and_attach_ids(
             f"{remaining} PostgreSQL chunks were not "
             "matched with generated embeddings."
         )
+
+
+# ---------------------------------------------------------
+# PERSIST POSTGRESQL CHUNKS BEFORE EMBEDDINGS
+# ---------------------------------------------------------
+
+def _persist_file_chunks(
+    db,
+    repository_id: int,
+    file_chunks: list[dict],
+) -> list:
+
+    records = []
+
+    for chunk in file_chunks:
+
+        record = RepositoryChunk(
+            repository_id=repository_id,
+            file_path=chunk["file_path"],
+            symbol_name=chunk["symbol_name"],
+            symbol_kind=chunk["symbol_kind"],
+            start_line=chunk["start_line"],
+            end_line=chunk["end_line"],
+            content=chunk["content"],
+            commit_sha=chunk.get("commit_sha"),
+        )
+
+        db.add(record)
+        records.append(record)
+
+    db.flush()
+
+    return records
 
 
 # ---------------------------------------------------------
@@ -763,14 +782,13 @@ async def process_ingestion_job(job_id: int):
                     )
                 ).all()
 
-                # Determine whether PostgreSQL file content
-                # is unchanged.
+                # Check whether PostgreSQL content is unchanged.
                 file_unchanged = (
                     existing_file is not None
                     and existing_file.file_hash == file_hash
                 )
 
-                # Always inspect Qdrant, even for unchanged files.
+                # Inspect Qdrant even for unchanged files.
                 old_point_ids = (
                     await _get_qdrant_file_point_ids(
                         repository_id=job.repository_id,
@@ -778,7 +796,6 @@ async def process_ingestion_job(job_id: int):
                     )
                 )
 
-                # Compare actual Qdrant IDs with expected UUID5 IDs.
                 qdrant_is_consistent = (
                     _check_qdrant_consistency(
                         existing_chunks=existing_chunks,
@@ -787,7 +804,7 @@ async def process_ingestion_job(job_id: int):
                     )
                 )
 
-                # Skip only when both systems are consistent.
+                # Skip only if both PostgreSQL and Qdrant are consistent.
                 if file_unchanged and qdrant_is_consistent:
 
                     processed_count += 1
@@ -829,28 +846,6 @@ async def process_ingestion_job(job_id: int):
                 stored_ids = []
 
                 # -------------------------------------------------
-                # GENERATE EMBEDDINGS
-                # -------------------------------------------------
-
-                if file_chunks:
-
-                    embedded_chunks = await asyncio.to_thread(
-                        embed_repository_chunks,
-                        file_chunks,
-                    )
-
-                    if not embedded_chunks:
-                        raise RuntimeError(
-                            f"No embeddings generated for "
-                            f"{file_path_value}"
-                        )
-
-                    _attach_embedding_metadata(
-                        file_chunks,
-                        embedded_chunks,
-                    )
-
-                # -------------------------------------------------
                 # UPDATE REPOSITORY FILE
                 # -------------------------------------------------
 
@@ -883,37 +878,64 @@ async def process_ingestion_job(job_id: int):
                         )
 
                 # -------------------------------------------------
-                # ATTACH POSTGRESQL CHUNK IDs
+                # PERSIST POSTGRESQL BEFORE EMBEDDINGS
+                # -------------------------------------------------
+
+                if not file_unchanged:
+
+                    # Delete previous chunks for changed files.
+                    for old_chunk in existing_chunks:
+                        db.delete(old_chunk)
+
+                    # Insert the latest source chunks.
+                    if file_chunks:
+
+                        existing_chunks = _persist_file_chunks(
+                            db=db,
+                            repository_id=job.repository_id,
+                            file_chunks=file_chunks,
+                        )
+
+                    else:
+                        existing_chunks = []
+
+                    # Commit file and chunks immediately.
+                    job.processed_files = processed_count
+                    db.commit()
+
+                    logger.info(
+                        "PostgreSQL persisted for %s. Chunks: %s",
+                        file_path_value,
+                        len(existing_chunks),
+                    )
+
+                # -------------------------------------------------
+                # GENERATE EMBEDDINGS AFTER POSTGRESQL COMMIT
                 # -------------------------------------------------
 
                 if file_chunks:
 
-                    if file_unchanged:
+                    embedded_chunks = await asyncio.to_thread(
+                        embed_repository_chunks,
+                        file_chunks,
+                    )
 
-                        # Preserve existing PostgreSQL chunk IDs.
-                        _attach_existing_chunk_ids(
-                            existing_chunks=existing_chunks,
-                            embedded_chunks=embedded_chunks,
+                    if not embedded_chunks:
+                        raise RuntimeError(
+                            f"No embeddings generated for "
+                            f"{file_path_value}"
                         )
 
-                    else:
+                    _attach_embedding_metadata(
+                        file_chunks,
+                        embedded_chunks,
+                    )
 
-                        # Replace PostgreSQL chunks only when
-                        # actual file content has changed.
-                        for old_chunk in existing_chunks:
-                            db.delete(old_chunk)
-
-                        _insert_chunks_and_attach_ids(
-                            db=db,
-                            repository_id=job.repository_id,
-                            file_chunks=file_chunks,
-                            embedded_chunks=embedded_chunks,
-                        )
-
-                elif not file_unchanged:
-
-                    for old_chunk in existing_chunks:
-                        db.delete(old_chunk)
+                    # Attach PostgreSQL IDs to embeddings.
+                    _attach_existing_chunk_ids(
+                        existing_chunks=existing_chunks,
+                        embedded_chunks=embedded_chunks,
+                    )
 
                 # -------------------------------------------------
                 # STORE QDRANT POINTS
@@ -940,7 +962,6 @@ async def process_ingestion_job(job_id: int):
                             f"for {file_path_value}"
                         )
 
-                    # Track newly introduced point IDs for rollback cleanup.
                     pending_new_point_ids.extend(
                         point_id
                         for point_id in stored_ids
@@ -1020,7 +1041,7 @@ async def process_ingestion_job(job_id: int):
             )
 
             # -----------------------------------------------------
-            # COMMIT POSTGRESQL
+            # FINAL POSTGRESQL COMMIT
             # -----------------------------------------------------
 
             job.processed_files = processed_count

@@ -431,9 +431,9 @@ def main():
     print("Existing Qdrant points:", len(old_records))
     print("Qdrant vector dimension:", vector_dimension)
 
-    if vector_dimension != 3072:
+    if vector_dimension != settings.embedding_dimension:
         raise RuntimeError(
-            f"Expected 3072 dimensions, got {vector_dimension}."
+            f"Expected {settings.embedding_dimension} dimensions, got {vector_dimension}."
         )
 
     # STEP 3: DRY RUN

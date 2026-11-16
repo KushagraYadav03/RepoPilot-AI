@@ -2,17 +2,56 @@
 import hashlib
 import logging
 import math
-import random
-import re
-import time
-from typing import Any, Callable, Optional, Sequence
 
-import httpx
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Callable, Optional, Sequence
 
 from app.core.config import settings
 
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------
+# FASTEMBED MODEL CACHE
+# ---------------------------------------------------------
+
+@lru_cache(maxsize=2)
+def _get_cached_embedding_model(
+    model_name: str,
+    cache_dir: str,
+    threads: int,
+):
+    """
+    Load FastEmbed model once and reuse it.
+
+    Model download happens automatically on first use.
+    """
+
+    from fastembed import TextEmbedding
+
+    Path(cache_dir).mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    logger.info(
+        "Loading local embedding model: %s",
+        model_name,
+    )
+
+    model = TextEmbedding(
+        model_name=model_name,
+        cache_dir=cache_dir,
+        threads=threads,
+    )
+
+    logger.info(
+        "Local embedding model loaded successfully."
+    )
+
+    return model
 
 
 class EmbeddingService:
@@ -25,28 +64,28 @@ class EmbeddingService:
         max_retries: int = 8,
         timeout: float = 60.0,
     ):
-        self.api_key = (
-            api_key
-            if api_key is not None
-            else getattr(settings, "gemini_api_key", None)
-        )
+        """
+        Local FastEmbed implementation.
 
-        configured_model = (
+        api_key, max_retries and timeout are retained
+        for backward compatibility with older callers.
+
+        They are not used for local inference.
+        """
+
+        self.model_name = (
             model
             or getattr(
                 settings,
                 "embedding_model",
-                "gemini-embedding-001",
+                "jinaai/jina-embeddings-v2-base-code",
             )
-            or "gemini-embedding-001"
         )
-
-        self.model = configured_model.removeprefix("models/")
 
         self.batch_size = (
             batch_size
             if batch_size is not None
-            else getattr(settings, "embedding_batch_size", 16)
+            else settings.embedding_batch_size
         )
 
         if self.batch_size <= 0:
@@ -54,19 +93,35 @@ class EmbeddingService:
                 "Batch size must be greater than zero"
             )
 
-        self.max_retries = max(0, max_retries)
-        self.timeout = timeout
-
-        self.base_url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:batchEmbedContents"
+        self.embedding_dimension = (
+            settings.embedding_dimension
         )
 
-        self.client = httpx.Client(timeout=self.timeout)
+        self.cache_dir = settings.embedding_cache_dir
 
-    def _ensure_api_key(self):
-        if not self.api_key:
-            raise ValueError("Gemini API key is missing")
+        self.threads = settings.embedding_threads
+
+        self._model = None
+
+    # -----------------------------------------------------
+    # MODEL INITIALIZATION
+    # -----------------------------------------------------
+
+    def _get_model(self):
+
+        if self._model is None:
+
+            self._model = _get_cached_embedding_model(
+                self.model_name,
+                self.cache_dir,
+                self.threads,
+            )
+
+        return self._model
+
+    # -----------------------------------------------------
+    # TEXT NORMALIZATION
+    # -----------------------------------------------------
 
     @staticmethod
     def _normalize_text(value: Any) -> str:
@@ -78,6 +133,10 @@ class EmbeddingService:
             value = str(value)
 
         return value.strip()
+
+    # -----------------------------------------------------
+    # CHUNK IDENTITY
+    # -----------------------------------------------------
 
     @staticmethod
     def _get_chunk_identity(
@@ -96,7 +155,14 @@ class EmbeddingService:
             ).hexdigest(),
         )
 
-    def _build_chunk_text(self, chunk: dict) -> str:
+    # -----------------------------------------------------
+    # BUILD ENRICHED CHUNK TEXT
+    # -----------------------------------------------------
+
+    def _build_chunk_text(
+        self,
+        chunk: dict,
+    ) -> str:
 
         content = self._normalize_text(
             chunk.get("content")
@@ -120,53 +186,20 @@ class EmbeddingService:
             value = chunk.get(field)
 
             if value is not None and str(value).strip():
-                parts.append(f"{label}: {value}")
 
-        parts.append(f"content:\n{content}")
+                parts.append(
+                    f"{label}: {value}"
+                )
+
+        parts.append(
+            f"content:\n{content}"
+        )
 
         return "\n".join(parts)
 
-    def build_embedding_request(
-        self,
-        texts: Sequence[str],
-        task_type: str = "RETRIEVAL_DOCUMENT",
-    ) -> dict:
-        """
-        Build Gemini embedding API request payload.
-        """
-
-        if task_type not in (
-            "RETRIEVAL_DOCUMENT",
-            "RETRIEVAL_QUERY",
-        ):
-            raise ValueError(
-                f"Unsupported embedding task type: {task_type}"
-            )
-
-        requests = []
-
-        for text in texts:
-
-            normalized_text = self._normalize_text(text)
-
-            if not normalized_text:
-                raise ValueError(
-                    "Embedding text cannot be empty"
-                )
-
-            requests.append({
-                "model": f"models/{self.model}",
-                "content": {
-                    "parts": [
-                        {"text": normalized_text}
-                    ]
-                },
-                "taskType": task_type,
-            })
-
-        return {
-            "requests": requests
-        }
+    # -----------------------------------------------------
+    # PREPARE EMBEDDING PAYLOAD
+    # -----------------------------------------------------
 
     def prepare_embedding_payload(
         self,
@@ -174,6 +207,7 @@ class EmbeddingService:
     ) -> list[dict]:
 
         prepared = []
+
         seen_chunks = set()
         seen_ids = set()
 
@@ -188,7 +222,9 @@ class EmbeddingService:
                 chunk.get("content")
             )
 
-            enriched_text = self._build_chunk_text(chunk)
+            enriched_text = self._build_chunk_text(
+                chunk
+            )
 
             if not enriched_text:
                 continue
@@ -206,13 +242,14 @@ class EmbeddingService:
                 chunk.get("id"),
             )
 
-            if chunk_id is not None and chunk_id in seen_ids:
-                continue
+            if chunk_id is not None:
+
+                if chunk_id in seen_ids:
+                    continue
+
+                seen_ids.add(chunk_id)
 
             seen_chunks.add(chunk_identity)
-
-            if chunk_id is not None:
-                seen_ids.add(chunk_id)
 
             prepared.append({
                 "repository_chunk_id": chunk_id,
@@ -227,11 +264,19 @@ class EmbeddingService:
 
         return prepared
 
+    # -----------------------------------------------------
+    # VECTOR VALIDATION
+    # -----------------------------------------------------
+
     @staticmethod
     def _validate_vector(
         vector: Any,
         expected_dimension: Optional[int] = None,
     ) -> list[float]:
+
+        # FastEmbed commonly returns NumPy arrays.
+        if hasattr(vector, "tolist"):
+            vector = vector.tolist()
 
         if not isinstance(vector, (list, tuple)):
             raise ValueError(
@@ -247,12 +292,17 @@ class EmbeddingService:
 
         for value in vector:
 
-            if not isinstance(value, (int, float)):
+            if isinstance(value, (str, bytes, bool)):
                 raise ValueError(
                     "Embedding contains a non-numeric value"
                 )
 
-            number = float(value)
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    "Embedding contains a non-numeric value"
+                ) from exc
 
             if not math.isfinite(number):
                 raise ValueError(
@@ -265,6 +315,7 @@ class EmbeddingService:
             expected_dimension is not None
             and len(result) != expected_dimension
         ):
+
             raise ValueError(
                 f"Invalid embedding dimension: expected "
                 f"{expected_dimension}, received {len(result)}"
@@ -272,132 +323,9 @@ class EmbeddingService:
 
         return result
 
-    @staticmethod
-    def _get_retry_delay(
-        response: Optional[httpx.Response],
-        attempt: int,
-    ) -> float:
-
-        if response is not None:
-
-            retry_after = response.headers.get(
-                "Retry-After"
-            )
-
-            if retry_after:
-                try:
-                    return min(float(retry_after), 120.0)
-                except ValueError:
-                    pass
-
-            response_text = response.text or ""
-
-            match = re.search(
-                r"retry in ([0-9.]+)s",
-                response_text,
-                re.IGNORECASE,
-            )
-
-            if match:
-                return min(
-                    float(match.group(1)),
-                    120.0,
-                )
-
-        delay = min(2 ** attempt, 60)
-
-        return delay + random.uniform(0, 1)
-
-    def _post_embedding_request(
-        self,
-        payload: dict,
-    ) -> dict:
-
-        self._ensure_api_key()
-
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key,
-        }
-
-        last_error = None
-
-        for attempt in range(self.max_retries + 1):
-
-            response = None
-
-            try:
-
-                response = self.client.post(
-                    self.base_url,
-                    headers=headers,
-                    json=payload,
-                )
-
-                if response.status_code == 200:
-                    return response.json()
-
-                if (
-                    response.status_code == 429
-                    or response.status_code >= 500
-                ):
-
-                    last_error = RuntimeError(
-                        f"Gemini HTTP {response.status_code}: "
-                        f"{response.text}"
-                    )
-
-                    if attempt < self.max_retries:
-
-                        delay = self._get_retry_delay(
-                            response,
-                            attempt,
-                        )
-
-                        logger.warning(
-                            "Gemini HTTP %s. Retry %s/%s "
-                            "after %.2fs",
-                            response.status_code,
-                            attempt + 1,
-                            self.max_retries,
-                            delay,
-                        )
-
-                        time.sleep(delay)
-                        continue
-
-                response.raise_for_status()
-
-            except (
-                httpx.TimeoutException,
-                httpx.NetworkError,
-            ) as exc:
-
-                last_error = exc
-
-                if attempt >= self.max_retries:
-                    break
-
-                delay = self._get_retry_delay(
-                    response,
-                    attempt,
-                )
-
-                logger.warning(
-                    "Gemini network error. Retry %s/%s "
-                    "after %.2fs: %s",
-                    attempt + 1,
-                    self.max_retries,
-                    delay,
-                    exc,
-                )
-
-                time.sleep(delay)
-
-        raise RuntimeError(
-            f"Gemini embedding request failed after "
-            f"{self.max_retries + 1} attempts"
-        ) from last_error
+    # -----------------------------------------------------
+    # DOCUMENT EMBEDDING
+    # -----------------------------------------------------
 
     def _generate_batch_embeddings(
         self,
@@ -407,42 +335,36 @@ class EmbeddingService:
         if not texts:
             return []
 
-        payload = self.build_embedding_request(
+        model = self._get_model()
+
+        vectors = model.embed(
             texts,
-            task_type="RETRIEVAL_DOCUMENT",
+            batch_size=self.batch_size,
         )
-
-        response = self._post_embedding_request(payload)
-
-        embeddings = response.get("embeddings")
-
-        if not isinstance(embeddings, list):
-            raise ValueError(
-                "Gemini response does not contain embeddings"
-            )
-
-        if len(embeddings) != len(texts):
-            raise ValueError(
-                f"Expected {len(texts)} embeddings, "
-                f"received {len(embeddings)}"
-            )
 
         result = []
 
-        for item in embeddings:
-
-            if not isinstance(item, dict):
-                raise ValueError(
-                    "Invalid embedding response item"
-                )
+        for vector in vectors:
 
             result.append(
                 self._validate_vector(
-                    item.get("values")
+                    vector,
+                    expected_dimension=self.embedding_dimension,
                 )
             )
 
+        if len(result) != len(texts):
+
+            raise ValueError(
+                f"Expected {len(texts)} embeddings, "
+                f"received {len(result)}"
+            )
+
         return result
+
+    # -----------------------------------------------------
+    # GENERATE DOCUMENT EMBEDDINGS
+    # -----------------------------------------------------
 
     def generate_embeddings(
         self,
@@ -452,12 +374,12 @@ class EmbeddingService:
         ] = None,
     ) -> list[dict]:
 
-        prepared = self.prepare_embedding_payload(chunks)
+        prepared = self.prepare_embedding_payload(
+            chunks
+        )
 
         if not prepared:
             return []
-
-        self._ensure_api_key()
 
         total_batches = math.ceil(
             len(prepared) / self.batch_size
@@ -482,15 +404,19 @@ class EmbeddingService:
             ]
 
             logger.info(
-                "Generating embedding batch %s/%s (%s chunks)",
+                "Generating local embedding batch %s/%s "
+                "(%s chunks)",
                 batch_index + 1,
                 total_batches,
                 len(batch),
             )
 
-            vectors = self._generate_batch_embeddings(texts)
+            vectors = self._generate_batch_embeddings(
+                texts
+            )
 
             if len(vectors) != len(batch):
+
                 raise ValueError(
                     "Embedding count does not match batch size"
                 )
@@ -501,11 +427,17 @@ class EmbeddingService:
 
                 result = {
                     **item,
-                    "embedding": self._validate_vector(vector),
+                    "embedding": self._validate_vector(
+                        vector,
+                        expected_dimension=self.embedding_dimension,
+                    ),
+                    "embedding_model": self.model_name,
+                    "embedding_dimension": self.embedding_dimension,
                 }
 
                 batch_results.append(result)
 
+            # Preserve existing ingestion callback.
             if on_batch_complete is not None:
 
                 on_batch_complete(
@@ -518,44 +450,60 @@ class EmbeddingService:
 
         return all_results
 
+    # -----------------------------------------------------
+    # QUERY EMBEDDING
+    # -----------------------------------------------------
+
     def generate_query_embedding(
         self,
         query: str,
     ) -> list[float]:
 
-        normalized_query = self._normalize_text(query)
+        normalized_query = self._normalize_text(
+            query
+        )
 
         if not normalized_query:
+
             raise ValueError(
                 "Query cannot be empty"
             )
 
-        payload = self.build_embedding_request(
-            [normalized_query],
-            task_type="RETRIEVAL_QUERY",
+        model = self._get_model()
+
+        vectors = list(
+            model.query_embed(
+                normalized_query
+            )
         )
 
-        response = self._post_embedding_request(payload)
+        if len(vectors) != 1:
 
-        embeddings = response.get("embeddings")
-
-        if not embeddings or len(embeddings) != 1:
             raise ValueError(
                 "Invalid query embedding response"
             )
 
-        if not isinstance(embeddings[0], dict):
-            raise ValueError(
-                "Invalid query embedding response item"
-            )
-
         return self._validate_vector(
-            embeddings[0].get("values")
+            vectors[0],
+            expected_dimension=self.embedding_dimension,
         )
 
-    def close(self):
-        self.client.close()
+    # -----------------------------------------------------
+    # CLOSE
+    # -----------------------------------------------------
 
+    def close(self):
+        """
+        No network client exists in local FastEmbed.
+
+        Model instance is cached and reused.
+        """
+        self._model = None
+
+
+# ---------------------------------------------------------
+# PUBLIC DOCUMENT EMBEDDING WRAPPER
+# ---------------------------------------------------------
 
 def embed_repository_chunks(
     chunks: Sequence[dict],
@@ -570,13 +518,19 @@ def embed_repository_chunks(
     service = EmbeddingService(**kwargs)
 
     try:
+
         return service.generate_embeddings(
             chunks,
             on_batch_complete=on_batch_complete,
         )
+
     finally:
         service.close()
 
+
+# ---------------------------------------------------------
+# PUBLIC QUERY EMBEDDING WRAPPER
+# ---------------------------------------------------------
 
 def embed_query(
     query: str,
@@ -586,6 +540,10 @@ def embed_query(
     service = EmbeddingService(**kwargs)
 
     try:
-        return service.generate_query_embedding(query)
+
+        return service.generate_query_embedding(
+            query
+        )
+
     finally:
         service.close()

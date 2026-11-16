@@ -2,6 +2,7 @@
 import logging
 import math
 import uuid
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
@@ -425,6 +426,66 @@ class QdrantVectorStore:
                     f"received {len(vector)} at point {index}."
                 )
 
+            # ---------------------------------------------
+            # EMBEDDING MODEL METADATA
+            # ---------------------------------------------
+
+            embedding_model = item.get(
+                "embedding_model"
+            )
+
+            if embedding_model is None:
+                embedding_model = metadata.get(
+                    "embedding_model"
+                )
+
+            embedding_dimension = item.get(
+                "embedding_dimension"
+            )
+
+            if embedding_dimension is None:
+                embedding_dimension = metadata.get(
+                    "embedding_dimension"
+                )
+
+            # Preserve backward compatibility:
+            # Both fields are optional for legacy callers.
+            if (
+                embedding_model is not None
+                or embedding_dimension is not None
+            ):
+
+                if (
+                    not isinstance(embedding_model, str)
+                    or not embedding_model.strip()
+                ):
+                    raise ValueError(
+                        f"Missing or invalid embedding_model "
+                        f"at point {index}."
+                    )
+
+                embedding_model = embedding_model.strip()
+
+                embedding_dimension = _validate_positive_integer(
+                    embedding_dimension,
+                    "embedding_dimension",
+                )
+
+                if embedding_dimension != len(vector):
+                    raise ValueError(
+                        f"Embedding dimension mismatch at point "
+                        f"{index}: metadata declares "
+                        f"{embedding_dimension}, but vector "
+                        f"contains {len(vector)} values."
+                    )
+
+                # Store in nested metadata too.
+                metadata["embedding_model"] = embedding_model
+
+                metadata["embedding_dimension"] = (
+                    embedding_dimension
+                )
+
             content = (
                 item.get("content")
                 or metadata.get("content")
@@ -494,6 +555,15 @@ class QdrantVectorStore:
                 "commit_sha": commit_sha,
                 "metadata": metadata,
             }
+
+            # Top-level embedding metadata.
+            if embedding_model is not None:
+
+                payload["embedding_model"] = embedding_model
+
+                payload["embedding_dimension"] = (
+                    embedding_dimension
+                )
 
             point_id = self._get_point_id(
                 {
@@ -633,11 +703,15 @@ class QdrantVectorStore:
             must=[
                 FieldCondition(
                     key="repository_id",
-                    match=MatchValue(value=repository_id),
+                    match=MatchValue(
+                        value=repository_id
+                    ),
                 ),
                 FieldCondition(
                     key="file_path",
-                    match=MatchValue(value=file_path),
+                    match=MatchValue(
+                        value=file_path
+                    ),
                 ),
             ]
         )
@@ -863,6 +937,36 @@ def store_repository_embeddings(
         if vector is None:
             vector = point.get("vector")
 
+        # ---------------------------------------------
+        # FORWARD EMBEDDING MODEL METADATA
+        # ---------------------------------------------
+
+        embedding_model = point.get(
+            "embedding_model"
+        )
+
+        if embedding_model is None:
+            embedding_model = metadata.get(
+                "embedding_model"
+            )
+
+        embedding_dimension = point.get(
+            "embedding_dimension"
+        )
+
+        if embedding_dimension is None:
+            embedding_dimension = metadata.get(
+                "embedding_dimension"
+            )
+
+        if embedding_model is not None:
+            metadata["embedding_model"] = embedding_model
+
+        if embedding_dimension is not None:
+            metadata["embedding_dimension"] = (
+                embedding_dimension
+            )
+
         metadata["repository_chunk_id"] = (
             repository_chunk_id
         )
@@ -904,6 +1008,8 @@ def store_repository_embeddings(
                 "embedding_text": embedding_text,
                 "text": embedding_text,
                 "vector": vector,
+                "embedding_model": embedding_model,
+                "embedding_dimension": embedding_dimension,
                 "metadata": metadata,
             }
         )

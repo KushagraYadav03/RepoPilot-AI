@@ -3,9 +3,13 @@ class FakeDB:
     def __init__(self, job=None, repository=None):
         self.job = job
         self.repository = repository
+
         self.files = []
         self.chunks = []
+
         self.commits = []
+        self.commit_count = 0
+
         self.rollback_called = False
         self.next_chunk_id = 1
 
@@ -19,6 +23,7 @@ class FakeDB:
         return self.job
 
     def add(self, instance):
+
         if isinstance(instance, ingestion_service.RepositoryFile):
             self.files.append(instance)
 
@@ -30,7 +35,9 @@ class FakeDB:
         Simulate PostgreSQL assigning primary keys
         to newly inserted RepositoryChunk records.
         """
+
         for chunk in self.chunks:
+
             if getattr(chunk, "id", None) is None:
                 chunk.id = self.next_chunk_id
                 self.next_chunk_id += 1
@@ -55,6 +62,7 @@ class FakeDB:
         return FakeScalarResult([])
 
     def delete(self, instance):
+
         if instance in self.files:
             self.files.remove(instance)
 
@@ -62,6 +70,12 @@ class FakeDB:
             self.chunks.remove(instance)
 
     def commit(self):
+        """
+        Track every commit, including intermediate
+        PostgreSQL persistence commits.
+        """
+
+        self.commit_count += 1
         self.commits.append(self.job.status)
 
     def rollback(self):
