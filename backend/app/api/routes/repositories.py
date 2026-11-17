@@ -1,24 +1,57 @@
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    status,
+)
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_db, get_current_user_id, resolve_user_id
+from app.core.dependencies import (
+    get_db,
+    get_current_user_id,
+    resolve_user_id,
+)
+
 from app.schemas.ingestion import IngestionJobResponse
-from app.schemas.repository import RepositoryCreate, RepositoryResponse
+
+from app.schemas.repository import (
+    RepositoryCreate,
+    RepositoryResponse,
+)
+
+from app.schemas.github import (
+    PullRequestListResponse,
+    GitHubDiffResponse,
+)
+
 from app.services.ingestion_service import process_ingestion_job
 from app.services.repository_service import RepositoryService
+
+from app.services.git_service import (
+    extract_github_repository,
+    fetch_github_pull_requests,
+    fetch_github_pull_request_diff,
+    fetch_github_commit_diff,
+)
 
 
 router = APIRouter(
     prefix="/repositories",
-    tags=["Repositories"]
+    tags=["Repositories"],
 )
 
+
+# =========================================================
+# CREATE REPOSITORY
+# =========================================================
 
 @router.post(
     "",
     response_model=RepositoryResponse,
-    status_code=status.HTTP_201_CREATED
+    status_code=status.HTTP_201_CREATED,
 )
 def add_repository(
     data: RepositoryCreate,
@@ -35,7 +68,9 @@ def add_repository(
             str(data.github_url),
             current_user_id,
         )
+
     except ValueError as exc:
+
         if str(exc) == "Repository already exists for this user":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -47,11 +82,23 @@ def add_repository(
             detail=str(exc),
         ) from exc
 
-    job = RepositoryService.create_ingestion_job(db, repository.id, current_user_id)
-    background_tasks.add_task(process_ingestion_job, job.id)
+    job = RepositoryService.create_ingestion_job(
+        db,
+        repository.id,
+        current_user_id,
+    )
+
+    background_tasks.add_task(
+        process_ingestion_job,
+        job.id,
+    )
 
     return repository
 
+
+# =========================================================
+# REFRESH REPOSITORY
+# =========================================================
 
 @router.post(
     "/{repository_id}/refresh",
@@ -74,28 +121,171 @@ def refresh_repository(
 
     if repository is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="Repository not found",
         )
 
-    job = RepositoryService.create_ingestion_job(db, repository.id, current_user_id)
-    background_tasks.add_task(process_ingestion_job, job.id)
+    job = RepositoryService.create_ingestion_job(
+        db,
+        repository.id,
+        current_user_id,
+    )
+
+    background_tasks.add_task(
+        process_ingestion_job,
+        job.id,
+    )
 
     return job
 
 
-@router.get("", response_model=list[RepositoryResponse])
+# =========================================================
+# LIST REPOSITORIES
+# =========================================================
+
+@router.get(
+    "",
+    response_model=list[RepositoryResponse],
+)
 def list_repositories(
     db: Session = Depends(get_db),
     current_user: int = Depends(get_current_user_id),
 ):
     current_user_id = resolve_user_id(current_user)
-    return RepositoryService.list_repositories(db, current_user_id)
 
+    return RepositoryService.list_repositories(
+        db,
+        current_user_id,
+    )
+
+
+# =========================================================
+# WEEK 5 DAY 1: LIST PULL REQUESTS
+# =========================================================
+
+@router.get(
+    "/{repository_id}/pull-requests",
+    response_model=PullRequestListResponse,
+)
+async def list_repository_pull_requests(
+    repository_id: int,
+    state: str = Query(
+        default="open",
+        description="Pull request state: open, closed, or all",
+    ),
+    db: Session = Depends(get_db),
+    current_user: int = Depends(get_current_user_id),
+):
+    user_id = resolve_user_id(current_user)
+
+    repository = RepositoryService.get_repository_by_id(
+        db,
+        repository_id,
+        user_id,
+    )
+
+    if repository is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found",
+        )
+
+    owner, repo = extract_github_repository(
+        repository.github_url,
+    )
+
+    return await fetch_github_pull_requests(
+        owner,
+        repo,
+        state,
+    )
+
+
+# =========================================================
+# WEEK 5 DAY 1: PULL REQUEST DIFF
+# =========================================================
+
+@router.get(
+    "/{repository_id}/pull-requests/{pr_number}/diff",
+    response_model=GitHubDiffResponse,
+)
+async def get_repository_pull_request_diff(
+    repository_id: int,
+    pr_number: int,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(get_current_user_id),
+):
+    user_id = resolve_user_id(current_user)
+
+    repository = RepositoryService.get_repository_by_id(
+        db,
+        repository_id,
+        user_id,
+    )
+
+    if repository is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found",
+        )
+
+    owner, repo = extract_github_repository(
+        repository.github_url,
+    )
+
+    return await fetch_github_pull_request_diff(
+        owner,
+        repo,
+        pr_number,
+    )
+
+
+# =========================================================
+# WEEK 5 DAY 1: COMMIT DIFF
+# =========================================================
+
+@router.get(
+    "/{repository_id}/commits/{sha}/diff",
+    response_model=GitHubDiffResponse,
+)
+async def get_repository_commit_diff(
+    repository_id: int,
+    sha: str,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(get_current_user_id),
+):
+    user_id = resolve_user_id(current_user)
+
+    repository = RepositoryService.get_repository_by_id(
+        db,
+        repository_id,
+        user_id,
+    )
+
+    if repository is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found",
+        )
+
+    owner, repo = extract_github_repository(
+        repository.github_url,
+    )
+
+    return await fetch_github_commit_diff(
+        owner,
+        repo,
+        sha,
+    )
+
+
+# =========================================================
+# GET REPOSITORY
+# =========================================================
 
 @router.get(
     "/{repository_id}",
-    response_model=RepositoryResponse
+    response_model=RepositoryResponse,
 )
 def get_repository(
     repository_id: int,
@@ -112,12 +302,16 @@ def get_repository(
 
     if repository is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="Repository not found",
         )
 
     return repository
 
+
+# =========================================================
+# DELETE REPOSITORY
+# =========================================================
 
 @router.delete(
     "/{repository_id}",
@@ -138,10 +332,13 @@ def remove_repository(
 
     if repository is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="Repository not found",
         )
 
-    RepositoryService.delete_repository(db, repository)
+    RepositoryService.delete_repository(
+        db,
+        repository,
+    )
 
     return None
