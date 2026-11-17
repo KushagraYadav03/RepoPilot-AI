@@ -61,6 +61,23 @@ def _raise_github_error(
             ),
         )
 
+    # GitHub returns 422 for a syntactically valid but
+    # non-existent commit SHA.
+    if status_code == 422 and operation == "commit diff request":
+
+        try:
+            github_message = (
+                response.json().get("message", "")
+            )
+        except (ValueError, AttributeError):
+            github_message = ""
+
+        if "no commit found for sha" in github_message.lower():
+            raise HTTPException(
+                status_code=404,
+                detail="Commit not found in the GitHub repository.",
+            )
+
     if status_code == 401:
         raise HTTPException(
             status_code=502,
@@ -357,6 +374,7 @@ async def fetch_github_tree(owner: str, repo: str):
         ),
         "files": selected_files,
     }
+
 
 # =========================================================
 # WEEK 5 - DAY 1: GITHUB DIFF INGESTION
