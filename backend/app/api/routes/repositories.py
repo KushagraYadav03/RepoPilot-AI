@@ -27,8 +27,11 @@ from app.schemas.github import (
     GitHubDiffResponse,
 )
 
+from app.schemas.code_review import CodeReviewResponse
+
 from app.services.ingestion_service import process_ingestion_job
 from app.services.repository_service import RepositoryService
+from app.services.code_review_service import CodeReviewService
 
 from app.services.git_service import (
     extract_github_repository,
@@ -277,6 +280,112 @@ async def get_repository_commit_diff(
         repo,
         sha,
     )
+
+
+# =========================================================
+# WEEK 5 DAY 3: AI PULL REQUEST CODE REVIEW
+# =========================================================
+
+@router.post(
+    "/{repository_id}/pull-requests/{pr_number}/review",
+    response_model=CodeReviewResponse,
+)
+async def review_repository_pull_request(
+    repository_id: int,
+    pr_number: int,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(get_current_user_id),
+):
+    user_id = resolve_user_id(current_user)
+
+    repository = RepositoryService.get_repository_by_id(
+        db,
+        repository_id,
+        user_id,
+    )
+
+    if repository is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found",
+        )
+
+    owner, repo = extract_github_repository(
+        repository.github_url,
+    )
+
+    diff = await fetch_github_pull_request_diff(
+        owner,
+        repo,
+        pr_number,
+    )
+
+    try:
+        review = await CodeReviewService().review_code_changes(
+            repository_id=repository.id,
+            diff=diff,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    return review
+
+
+# =========================================================
+# WEEK 5 DAY 3: AI COMMIT CODE REVIEW
+# =========================================================
+
+@router.post(
+    "/{repository_id}/commits/{sha}/review",
+    response_model=CodeReviewResponse,
+)
+async def review_repository_commit(
+    repository_id: int,
+    sha: str,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(get_current_user_id),
+):
+    user_id = resolve_user_id(current_user)
+
+    repository = RepositoryService.get_repository_by_id(
+        db,
+        repository_id,
+        user_id,
+    )
+
+    if repository is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found",
+        )
+
+    owner, repo = extract_github_repository(
+        repository.github_url,
+    )
+
+    diff = await fetch_github_commit_diff(
+        owner,
+        repo,
+        sha,
+    )
+
+    try:
+        review = await CodeReviewService().review_code_changes(
+            repository_id=repository.id,
+            diff=diff,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    return review
 
 
 # =========================================================
