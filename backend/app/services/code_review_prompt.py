@@ -1,3 +1,4 @@
+
 import json
 from typing import Any
 
@@ -12,7 +13,7 @@ Rules:
 1. Identify only genuine, actionable issues.
 2. Focus on bugs, security vulnerabilities, performance problems,
    incorrect logic, and maintainability issues.
-3. Use repository context only to understand the changed code.
+3. Use repository context only to understand changed code.
 4. Do not invent functions, variables, files, or behavior.
 5. Every finding must be supported by actual diff evidence.
 6. Report only issues introduced by the changes.
@@ -21,6 +22,10 @@ Rules:
 9. If no actionable issue exists, return an empty findings array.
 10. Confidence must be between 0.0 and 1.0.
 11. Use rule_id only when a meaningful rule identifier can be assigned.
+12. Repository context is supporting evidence, not proof that a
+    changed line contains a defect.
+13. Context relation describes why a source implementation was retrieved.
+14. Never use repository context line numbers as changed diff line numbers.
 
 Return ONLY valid JSON. Do not use Markdown code fences.
 
@@ -74,8 +79,13 @@ def build_code_review_prompt(
         repository_context.append({
             "file_path": chunk.get("file_path"),
             "symbol_name": chunk.get("symbol_name"),
+            "symbol_kind": chunk.get("symbol_kind"),
             "start_line": chunk.get("start_line"),
             "end_line": chunk.get("end_line"),
+            "commit_sha": chunk.get("commit_sha"),
+            "context_relation": chunk.get("context_relation"),
+            "related_symbol": chunk.get("related_symbol"),
+            "context_sources": chunk.get("context_sources", []),
             "content": (chunk.get("content") or "")[:5000],
             "relevance_score": chunk.get("score"),
         })
@@ -92,8 +102,11 @@ def build_code_review_prompt(
 
     return (
         "Review the following code changes.\n\n"
-        "Use the repository context to understand existing code, "
-        "but report findings only when supported by the diff.\n\n"
+        "Use repository context to understand callers, callees, "
+        "related classes, and dependencies.\n"
+        "Report findings only when supported by the actual diff.\n"
+        "Use source paths and line ranges to understand context "
+        "but never invent changed-line locations.\n\n"
         "CODE REVIEW INPUT:\n"
         f"{json.dumps(review_input, indent=2, ensure_ascii=False)}"
     )

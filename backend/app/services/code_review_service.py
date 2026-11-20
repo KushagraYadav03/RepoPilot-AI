@@ -1,10 +1,16 @@
+
 import json
 import logging
 from typing import Any
 
 from app.services.llm_service import LLMService
+
 from app.services.retrieval_service import (
     retrieve_repository_chunks,
+)
+
+from app.services.context_enrichment import (
+    enrich_review_context,
 )
 
 from app.services.code_review_prompt import (
@@ -46,6 +52,7 @@ class CodeReviewService:
         )
 
         for field in required_fields:
+
             if not diff.get(field):
                 raise ValueError(
                     f"Diff field '{field}' is required"
@@ -58,22 +65,44 @@ class CodeReviewService:
                 "No changed files available for code review"
             )
 
+        # ---------------------------------------------
+        # STEP 1: BUILD RETRIEVAL QUERY
+        # ---------------------------------------------
+
         query = self._build_retrieval_query(diff)
 
-        # Retrieve relevant repository code using RAG.
-        retrieved_context = retrieve_repository_chunks(
+        # ---------------------------------------------
+        # STEP 2: ENRICH REPOSITORY CONTEXT
+        # ---------------------------------------------
+
+        retrieved_context = enrich_review_context(
             repository_id=repository_id,
-            query=query,
-            limit=10,
+            diff=diff,
+            base_query=query,
+            retrieve_chunks=retrieve_repository_chunks,
+            semantic_limit=10,
+            structural_limit=20,
         )
 
-        # Build the complete review prompt.
+        logger.info(
+            "Generated enriched context for repository %s: %s chunks",
+            repository_id,
+            len(retrieved_context),
+        )
+
+        # ---------------------------------------------
+        # STEP 3: BUILD REVIEW PROMPT
+        # ---------------------------------------------
+
         prompt = build_code_review_prompt(
             diff=diff,
             retrieved_context=retrieved_context,
         )
 
-        # Generate review using the configured LLM provider.
+        # ---------------------------------------------
+        # STEP 4: GENERATE LLM REVIEW
+        # ---------------------------------------------
+
         llm_response = await self.llm_service.generate(
             prompt=prompt,
             system_instruction=SYSTEM_INSTRUCTION,
@@ -81,24 +110,27 @@ class CodeReviewService:
             max_output_tokens=8192,
         )
 
-        # Parse and validate the LLM response.
+        # ---------------------------------------------
+        # STEP 5: PARSE LLM RESPONSE
+        # ---------------------------------------------
+
         review_data = self._parse_llm_response(
             llm_response.text
         )
 
-        # Repository metadata must come from trusted application
-        # data, not from the LLM response.
         review_data["repository"] = diff["repository"]
         review_data["diff_type"] = diff["diff_type"]
         review_data["identifier"] = diff["identifier"]
         review_data["title"] = diff.get("title")
 
         try:
+
             return CodeReviewResponse.model_validate(
                 review_data
             )
 
         except Exception as exc:
+
             logger.exception(
                 "LLM returned an invalid code review response"
             )
@@ -115,6 +147,9 @@ class CodeReviewService:
         query_parts = []
 
         for file in diff.get("files", []):
+
+            if not isinstance(file, dict):
+                continue
 
             filename = file.get("filename", "")
             patch = file.get("patch") or ""
@@ -137,13 +172,13 @@ class CodeReviewService:
     ) -> dict[str, Any]:
 
         if not response_text or not response_text.strip():
+
             raise ValueError(
                 "LLM returned an empty code review response"
             )
 
         cleaned_response = response_text.strip()
 
-        # Handle accidental Markdown code fences.
         if cleaned_response.startswith("```"):
 
             lines = cleaned_response.splitlines()
@@ -156,6 +191,7 @@ class CodeReviewService:
             cleaned_response = "\n".join(lines).strip()
 
         try:
+
             parsed = json.loads(cleaned_response)
 
         except json.JSONDecodeError as exc:
@@ -169,6 +205,7 @@ class CodeReviewService:
             ) from exc
 
         if not isinstance(parsed, dict):
+
             raise ValueError(
                 "LLM response must be a JSON object"
             )
