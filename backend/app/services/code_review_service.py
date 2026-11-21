@@ -18,8 +18,13 @@ from app.services.code_review_prompt import (
     build_code_review_prompt,
 )
 
+from app.services.static_analysis_service import (
+    StaticAnalysisService,
+)
+
 from app.schemas.code_review import (
     CodeReviewResponse,
+    ReviewFinding,
 )
 
 
@@ -30,6 +35,7 @@ class CodeReviewService:
 
     def __init__(self):
         self.llm_service = LLMService()
+        self.static_analysis_service = StaticAnalysisService()
 
     async def review_code_changes(
         self,
@@ -125,7 +131,7 @@ class CodeReviewService:
 
         try:
 
-            return CodeReviewResponse.model_validate(
+            ai_review = CodeReviewResponse.model_validate(
                 review_data
             )
 
@@ -138,6 +144,157 @@ class CodeReviewService:
             raise ValueError(
                 "Unable to validate the generated code review"
             ) from exc
+
+        # ---------------------------------------------
+        # STEP 6: RUN STATIC ANALYSIS
+        # ---------------------------------------------
+
+        static_findings = await self._run_static_analysis(
+            diff=diff,
+            files=files,
+        )
+
+        logger.info(
+            "Static analysis generated %s findings",
+            len(static_findings),
+        )
+
+        # ---------------------------------------------
+        # STEP 7: MERGE AI + STATIC FINDINGS
+        # ---------------------------------------------
+
+        merged_findings = self._merge_findings(
+            ai_findings=ai_review.findings,
+            static_findings=static_findings,
+        )
+
+        # model_copy keeps the same response structure.
+        # Statistics are computed from the merged findings.
+        final_review = ai_review.model_copy(
+            update={
+                "findings": merged_findings,
+            }
+        )
+
+        logger.info(
+            (
+                "Code review completed for repository %s. "
+                "AI findings: %s, static findings: %s, "
+                "total findings: %s"
+            ),
+            repository_id,
+            len(ai_review.findings),
+            len(static_findings),
+            len(final_review.findings),
+        )
+
+        return final_review
+
+    # =================================================
+    # STATIC ANALYSIS
+    # =================================================
+
+    async def _run_static_analysis(
+        self,
+        diff: dict[str, Any],
+        files: list[dict[str, Any]],
+    ) -> list[ReviewFinding]:
+
+        repository = diff.get("repository", "")
+
+        if not isinstance(repository, str):
+            return []
+
+        parts = repository.split("/", 1)
+
+        if len(parts) != 2:
+            logger.warning(
+                "Invalid repository name for static analysis: %s",
+                repository,
+            )
+            return []
+
+        owner, repo = parts
+
+        # PR analysis must use the PR head commit.
+        # Commit analysis can use its commit SHA.
+        ref = diff.get("head_sha")
+
+        if not ref and diff.get("diff_type") == "commit":
+            ref = diff.get("identifier")
+
+        if not ref:
+            logger.warning(
+                "No source commit SHA available. "
+                "Skipping static analysis."
+            )
+            return []
+
+        try:
+
+            return await self.static_analysis_service.analyze_changed_files(
+                owner=owner,
+                repo=repo,
+                ref=ref,
+                files=files,
+            )
+
+        except Exception:
+
+            # Static analysis should not break the existing
+            # AI review pipeline if an analyzer fails.
+            logger.exception(
+                "Static analysis failed for %s",
+                repository,
+            )
+
+            return []
+
+    # =================================================
+    # MERGE AND DEDUPLICATE FINDINGS
+    # =================================================
+
+    @staticmethod
+    def _merge_findings(
+        ai_findings: list[ReviewFinding],
+        static_findings: list[ReviewFinding],
+    ) -> list[ReviewFinding]:
+
+        merged: list[ReviewFinding] = []
+        seen = set()
+
+        for finding in [
+            *ai_findings,
+            *static_findings,
+        ]:
+
+            if not isinstance(finding, ReviewFinding):
+                finding = ReviewFinding.model_validate(
+                    finding
+                )
+
+            location = finding.location
+
+            # Rule-based findings use rule_id for identity.
+            # AI findings without rule_id use their title.
+            identity = (
+                location.file_path,
+                location.start_line,
+                location.end_line,
+                finding.rule_id or finding.title.strip().lower(),
+            )
+
+            if identity in seen:
+                continue
+
+            seen.add(identity)
+            merged.append(finding)
+
+        return merged
+
+    # =================================================
+    # BUILD RETRIEVAL QUERY
+    # =================================================
 
     @staticmethod
     def _build_retrieval_query(
@@ -165,6 +322,10 @@ class CodeReviewService:
             "related to these code changes:\n"
             f"{query[:12000]}"
         )
+
+    # =================================================
+    # PARSE LLM RESPONSE
+    # =================================================
 
     @staticmethod
     def _parse_llm_response(

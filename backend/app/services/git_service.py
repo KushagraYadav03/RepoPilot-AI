@@ -1,9 +1,13 @@
 
-import httpx
+import base64
+import logging
 
 from pathlib import PurePosixPath
 from urllib.parse import quote
 from typing import Any
+
+import httpx
+
 from fastapi import HTTPException
 
 from app.core.config import settings
@@ -14,6 +18,9 @@ from app.utils.file_filters import (
     MAX_FILES,
     should_exclude_file,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 GITHUB_API_BASE_URL = "https://api.github.com"
@@ -736,3 +743,77 @@ async def fetch_github_commit_diff(
         "files_truncated": files_truncated,
         "files": files,
     }
+
+
+async def fetch_github_file_content(
+    owner: str,
+    repo: str,
+    file_path: str,
+    ref: str,
+) -> str | None:
+    """
+    Fetch complete source code of a file from GitHub.
+
+    Uses the GitHub Contents API at a specific commit SHA.
+    Returns None when source content is unavailable.
+    """
+
+    if not owner or not repo or not file_path or not ref:
+        return None
+
+    encoded_owner = quote(owner, safe="")
+    encoded_repo = quote(repo, safe="")
+    encoded_path = quote(file_path, safe="/")
+    encoded_ref = quote(ref, safe="")
+
+    url = (
+        f"{GITHUB_API_BASE_URL}/repos/"
+        f"{encoded_owner}/{encoded_repo}/contents/"
+        f"{encoded_path}?ref={encoded_ref}"
+    )
+
+    try:
+        data = await github_api_get(
+            url,
+            "changed source file request",
+        )
+
+    except HTTPException as exc:
+
+        if exc.status_code == 404:
+            logger.warning(
+                "Source file not found: %s",
+                file_path,
+            )
+            return None
+
+        raise
+
+    if not isinstance(data, dict):
+        return None
+
+    if data.get("type") != "file":
+        return None
+
+    if data.get("encoding") != "base64":
+        return None
+
+    encoded_content = data.get("content")
+
+    if not isinstance(encoded_content, str):
+        return None
+
+    try:
+        decoded = base64.b64decode(
+            encoded_content,
+            validate=False,
+        )
+
+        return decoded.decode("utf-8")
+
+    except (ValueError, UnicodeDecodeError):
+        logger.warning(
+            "Unable to decode source file: %s",
+            file_path,
+        )
+        return None
