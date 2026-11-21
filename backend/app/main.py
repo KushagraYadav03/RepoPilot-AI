@@ -1,10 +1,13 @@
 
 import logging
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
 from app.api.routes import reviews
 
 from app.core.config import get_settings
@@ -20,6 +23,9 @@ from app.api.routes.github import router as github_router
 from app.api.routes.retrieval import router as retrieval_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.conversations import router as conversations_router
+
+from app.api.routes import test_generation
+from app.api.routes import sandbox
 
 from app.services.qdrant_service import close_local_qdrant_clients
 
@@ -65,6 +71,9 @@ app.include_router(retrieval_router)
 app.include_router(chat_router)
 app.include_router(conversations_router)
 app.include_router(reviews.router)
+
+app.include_router(test_generation.router)
+app.include_router(sandbox.router)
 
 
 # ---------------------------------------------------------

@@ -1,6 +1,8 @@
+
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,10 +20,9 @@ class Settings(BaseSettings):
     database_url: str
 
     # Gemini configuration
-    # Gemini is still used by the LLM provider.
     gemini_api_key: str = ""
 
-    # Local FastEmbed configuration
+    # FastEmbed configuration
     embedding_model: str = "jinaai/jina-embeddings-v2-base-code"
     embedding_batch_size: int = 16
     embedding_dimension: int = 768
@@ -39,14 +40,51 @@ class Settings(BaseSettings):
     # GitHub configuration
     github_token: str = ""
 
-    # Qdrant local persistent storage
+    # Qdrant configuration
     qdrant_path: str = str(
         BACKEND_DIR / "qdrant_data"
     )
 
-    # New collection for Jina 768-dimensional vectors.
-    # Existing repo_chunks collection remains untouched.
     qdrant_collection: str = "repo_chunks_jina"
+
+    # Docker sandbox configuration
+
+    sandbox_python_image: str = (
+        "repopilot-python-sandbox:latest"
+    )
+
+    sandbox_java_image: str = (
+        "repopilot-java-sandbox:latest"
+    )
+
+    sandbox_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=300,
+    )
+
+    sandbox_memory_limit: str = Field(
+        default="256m",
+        pattern=r"^[1-9][0-9]*[kKmMgG]?$",
+    )
+
+    sandbox_cpu_limit: float = Field(
+        default=0.5,
+        gt=0,
+        le=8,
+    )
+
+    sandbox_pids_limit: int = Field(
+        default=64,
+        ge=1,
+        le=4096,
+    )
+
+    sandbox_max_output_bytes: int = Field(
+        default=65536,
+        ge=1,
+        le=10_485_760,
+    )
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,
