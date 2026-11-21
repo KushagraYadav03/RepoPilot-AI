@@ -266,21 +266,43 @@ class StaticAnalysisService:
     @staticmethod
     def _ruff_severity(code: str) -> ReviewSeverity:
         """
-        Map Ruff rule families to review severities.
+        Map Ruff rule codes to review severities.
 
-        This is a practical severity mapping, not a claim
-        that every rule in a family has identical impact.
+        Security rules are HIGH.
+        Undefined-name rules are HIGH.
+        General errors and bug-prone patterns are MEDIUM.
+        Code quality rules are LOW.
+        Unknown rules are INFO.
         """
 
-        if code.startswith(("S", "F")):
+        code = code.upper().strip()
+
+        # Check SIM before S because SIM rules also start with S.
+        if code.startswith("SIM"):
+            return ReviewSeverity.LOW
+
+        # Security-related Ruff rules
+        if code.startswith("S"):
             return ReviewSeverity.HIGH
 
+        # Critical undefined-name and redefinition errors
+        if code in {
+            "F821",
+            "F822",
+            "F823",
+            "F831",
+        }:
+            return ReviewSeverity.HIGH
+
+        # General errors and bug-prone patterns
         if code.startswith(("E", "B")):
             return ReviewSeverity.MEDIUM
 
-        if code.startswith(("I", "UP", "SIM")):
+        # Code quality and modernization issues
+        if code.startswith(("F", "I", "UP")):
             return ReviewSeverity.LOW
 
+        # Unknown rules
         return ReviewSeverity.INFO
 
     # =====================================================
