@@ -8,3 +8,4 @@ from app.models.repository_chunk import RepositoryChunk
 
 from app.models.conversation import Conversation
 from app.models.message import Message
+from app.models.code_review import CodeReview

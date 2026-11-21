@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from app.api.routes import reviews
 
 from app.core.config import get_settings
 from app.core.logging_config import setup_logging
@@ -63,6 +64,7 @@ app.include_router(github_router)
 app.include_router(retrieval_router)
 app.include_router(chat_router)
 app.include_router(conversations_router)
+app.include_router(reviews.router)
 
 
 # ---------------------------------------------------------
